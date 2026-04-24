@@ -48,18 +48,23 @@ class BotState:
 state = BotState()
 
 def get_exchange() -> ccxt.okx:
-    exchange = ccxt.okx({
-        'apiKey':   os.environ.get('OKX_API_KEY', ''),
-        'secret':   os.environ.get('OKX_SECRET', ''),
-        'password': os.environ.get('OKX_PASSPHRASE', ''),
-        'options': {
-            'defaultType': 'spot',
-        },
-        'hostname': os.environ.get('OKX_HOSTNAME', 'www.okx.com'),
-    })
-    if os.environ.get('OKX_SANDBOX', 'true').lower() == 'true':
-        exchange.set_sandbox_mode(True)
-    return exchange
+    api_key    = os.environ.get('OKX_API_KEY', '')
+    secret     = os.environ.get('OKX_SECRET', '')
+    passphrase = os.environ.get('OKX_PASSPHRASE', '')
+    sandbox    = os.environ.get('OKX_SANDBOX', 'true').lower() == 'true'
+
+    params = {
+        'apiKey':   api_key,
+        'secret':   secret,
+        'password': passphrase,
+        'options':  {'defaultType': 'spot'},
+    }
+
+    # OKX demo trading: gebruik x-simulated-trading header
+    if sandbox:
+        params['headers'] = {'x-simulated-trading': '1'}
+
+    return ccxt.okx(params)
 
 def get_candles(exchange, symbol: str, timeframe: str, limit: int = 100):
     return exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
