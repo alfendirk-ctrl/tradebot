@@ -35,7 +35,7 @@ class Trade:
 @dataclass
 class BotState:
     running: bool = False
-    symbol: str = "BTC/USDT"
+    symbol: str = "BTC/USDC"
     risk_per_trade: float = 0.01
     trades: list = field(default_factory=list)
     last_signal: str = "none"
@@ -212,8 +212,12 @@ def run_bot():
     while state.running:
         try:
             balance_info  = exchange.fetch_balance()
-            state.balance = float(balance_info['USDT']['free'])
-            state.equity  = float(balance_info['USDT']['total'])
+            # Probeer USDC, val terug op USDT of USD
+            for currency in ['USDC', 'USDT', 'USD']:
+                if currency in balance_info and balance_info[currency]['total'] > 0:
+                    state.balance = float(balance_info[currency]['free'])
+                    state.equity  = float(balance_info[currency]['total'])
+                    break
 
             candles_15m = get_candles(exchange, state.symbol, '15m', limit=100)
             candles_1h  = get_candles(exchange, state.symbol, '1h',  limit=50)
