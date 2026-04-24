@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import threading
-from bot import state, run_bot, BotState
+from bot import state, run_bot
 from dataclasses import asdict
 
 app = FastAPI(title="BTC Trading Bot API")
@@ -27,17 +27,18 @@ def get_status():
     return {
         "running": state.running,
         "symbol": state.symbol,
-        "timeframe": state.timeframe,
+        "timeframe": "15m",
         "risk_per_trade": state.risk_per_trade,
         "last_signal": state.last_signal,
+        "last_setup": state.last_setup,
         "last_candle_time": state.last_candle_time,
         "balance": state.balance,
         "equity": state.equity,
         "total_pnl": state.total_pnl,
         "trades": trades_serialized,
-        "open_trades": sum(1 for t in state.trades if t.status == "open"),
+        "open_trades": sum(1 for t in state.trades if t.status != "closed"),
         "closed_trades": sum(1 for t in state.trades if t.status == "closed"),
-        "winning_trades": sum(1 for t in state.trades if t.status == "closed" and t.pnl and t.pnl > 0),
+        "winning_trades": sum(1 for t in state.trades if t.status == "closed" and t.realized_pnl and t.realized_pnl > 0),
     }
 
 @app.post("/start")
@@ -46,7 +47,6 @@ def start_bot(config: BotConfig):
     if state.running:
         raise HTTPException(status_code=400, detail="Bot is already running")
     state.symbol = config.symbol
-    state.timeframe = config.timeframe
     state.risk_per_trade = config.risk_per_trade
     state.running = True
     bot_thread = threading.Thread(target=run_bot, daemon=True)
