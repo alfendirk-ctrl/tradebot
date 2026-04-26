@@ -47,11 +47,11 @@ class BotState:
 
 state = BotState()
 
-def get_exchange() -> ccxt.okx:
+def get_exchange():
     api_key    = os.environ.get('OKX_API_KEY', '')
     secret     = os.environ.get('OKX_SECRET', '')
     passphrase = os.environ.get('OKX_PASSPHRASE', '')
-    sandbox    = os.environ.get('OKX_SANDBOX', 'true').lower() == 'true'
+    sandbox    = os.environ.get('OKX_SANDBOX', 'false').lower() == 'true'
 
     params = {
         'apiKey':   api_key,
@@ -59,12 +59,16 @@ def get_exchange() -> ccxt.okx:
         'password': passphrase,
         'options':  {'defaultType': 'spot'},
     }
-
-    # OKX demo trading: gebruik x-simulated-trading header
     if sandbox:
         params['headers'] = {'x-simulated-trading': '1'}
 
-    return ccxt.okx(params)
+    # EEA gebruikers (Nederland etc.) moeten myokx gebruiken ipv okx
+    try:
+        exchange = ccxt.myokx(params)
+    except AttributeError:
+        exchange = ccxt.okx(params)
+
+    return exchange
 
 def get_candles(exchange, symbol: str, timeframe: str, limit: int = 100):
     return exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
