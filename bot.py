@@ -35,8 +35,10 @@ class Trade:
 @dataclass
 class BotState:
     running: bool = False
-    symbol: str = "BTC/USDC"
+    symbol: str = "BTC/USDT"
     risk_per_trade: float = 0.01
+    sim_mode: bool = True          # True = paper trading, False = live
+    sim_balance: float = 10000.0   # startkapitaal voor simulatie
     trades: list = field(default_factory=list)
     last_signal: str = "none"
     last_setup: str = "none"
@@ -81,10 +83,11 @@ def calculate_position_size(balance: float, entry: float, stop: float, risk_pct:
     return round(risk_amount / risk_per_unit, 6)
 
 def place_order(exchange, symbol: str, signal: Signal, qty: float) -> Optional[Trade]:
-    try:
-        order = exchange.create_market_order(symbol, signal.side, qty)
+    """Plaats order — echt of gesimuleerd afhankelijk van sim_mode."""
+    if state.sim_mode:
+        # Paper trade: geen echte order, wel alles bijhouden
         trade = Trade(
-            id=order['id'],
+            id=f"SIM-{len(state.trades)+1:04d}",
             symbol=symbol,
             side=signal.side,
             setup_type=signal.setup_type,
@@ -98,23 +101,47 @@ def place_order(exchange, symbol: str, signal: Signal, qty: float) -> Optional[T
             timestamp=datetime.utcnow().isoformat(),
         )
         logger.info(
-            f"[{signal.setup_type.upper()}] {signal.side.upper()} {qty} {symbol} @ {signal.entry:.0f} | "
-            f"SL={signal.stop_loss:.0f} | TP1={signal.tp1:.0f} | TP2={signal.tp2:.0f} | TP3={signal.tp3:.0f} | Runner open"
+            f"[SIM] [{signal.setup_type.upper()}] {signal.side.upper()} {qty:.4f} {symbol} @ {signal.entry:.0f} | "
+            f"SL={signal.stop_loss:.0f} | TP1={signal.tp1:.0f} | TP2={signal.tp2:.0f} | TP3={signal.tp3:.0f}"
         )
         return trade
-    except Exception as e:
-        logger.error(f"Order mislukt: {e}")
-        return None
+    else:
+        try:
+            order = exchange.create_market_order(symbol, signal.side, qty)
+            trade = Trade(
+                id=order['id'],
+                symbol=symbol,
+                side=signal.side,
+                setup_type=signal.setup_type,
+                entry_price=signal.entry,
+                quantity=qty,
+                stop_loss=signal.stop_loss,
+                tp1=signal.tp1,
+                tp2=signal.tp2,
+                tp3=signal.tp3,
+                reason=signal.reason,
+                timestamp=datetime.utcnow().isoformat(),
+            )
+            logger.info(
+                f"[LIVE] [{signal.setup_type.upper()}] {signal.side.upper()} {qty} {symbol} @ {signal.entry:.0f} | "
+                f"SL={signal.stop_loss:.0f} | TP1={signal.tp1:.0f} | TP2={signal.tp2:.0f} | TP3={signal.tp3:.0f}"
+            )
+            return trade
+        except Exception as e:
+            logger.error(f"Order mislukt: {e}")
+            return None
 
 def partial_close(exchange, trade: Trade, fraction: float, curr_price: float, label: str):
-    """Sluit een deel van de positie en registreer de PnL."""
+    """Sluit een deel van de positie — echt of gesimuleerd."""
     qty = round(trade.quantity * fraction, 6)
-    try:
-        close_side = "sell" if trade.side == "buy" else "buy"
-        exchange.create_market_order(trade.symbol, close_side, qty)
-    except Exception as e:
-        logger.error(f"{label} order fout: {e}")
-        return 0.0
+
+    if not state.sim_mode:
+        try:
+            close_side = "sell" if trade.side == "buy" else "buy"
+            exchange.create_market_order(trade.symbol, close_side, qty)
+        except Exception as e:
+            logger.error(f"{label} order fout: {e}")
+            return 0.0
 
     if trade.side == "buy":
         pnl = (curr_price - trade.entry_price) * qty
@@ -123,7 +150,9 @@ def partial_close(exchange, trade: Trade, fraction: float, curr_price: float, la
 
     trade.realized_pnl += pnl
     state.total_pnl += pnl
-    logger.info(f"{label} ({fraction*100:.0f}% uit @ {curr_price:.0f}) | PnL = {pnl:.2f} USDT")
+
+    mode = "SIM" if state.sim_mode else "LIVE"
+    logger.info(f"[{mode}] {label} ({fraction*100:.0f}% @ {curr_price:.0f}) | PnL = {pnl:.2f} USDT")
     return pnl
 
 def trail_sl_to_structure(trade: Trade, candles: list, phase: int):
@@ -221,18 +250,33 @@ def manage_open_trades(exchange, candles_15m):
             trail_sl_to_structure(trade, candles_15m, phase=4)
 
 def run_bot():
+    # Simulatiemodus lezen uit environment variable
+    state.sim_mode = os.environ.get('SIM_MODE', 'true').lower() == 'true'
+    mode_label = "PAPER TRADING" if state.sim_mode else "LIVE TRADING"
+
     exchange = get_exchange()
-    logger.info(f"DoopieCash Bot gestart | {state.symbol}")
+    logger.info(f"DoopieCash Bot gestart | {state.symbol} | {mode_label}")
+
+    # Simulatiebalans instellen
+    if state.sim_mode:
+        state.sim_balance = float(os.environ.get('SIM_BALANCE', '10000'))
+        state.balance = state.sim_balance
+        state.equity  = state.sim_balance
+        logger.info(f"[SIM] Startkapitaal: ${state.balance:,.0f}")
 
     while state.running:
         try:
-            balance_info  = exchange.fetch_balance()
-            # Probeer USDC, val terug op USDT of USD
-            for currency in ['USDC', 'USDT', 'USD']:
-                if currency in balance_info and balance_info[currency]['total'] > 0:
-                    state.balance = float(balance_info[currency]['free'])
-                    state.equity  = float(balance_info[currency]['total'])
-                    break
+            if state.sim_mode:
+                # In sim mode: alleen marktdata ophalen, geen balance call
+                state.balance = state.sim_balance + state.total_pnl
+                state.equity  = state.balance
+            else:
+                balance_info  = exchange.fetch_balance()
+                for currency in ['USDT', 'USDC', 'USD']:
+                    if currency in balance_info and balance_info[currency]['total'] > 0:
+                        state.balance = float(balance_info[currency]['free'])
+                        state.equity  = float(balance_info[currency]['total'])
+                        break
 
             candles_15m = get_candles(exchange, state.symbol, '15m', limit=100)
             candles_1h  = get_candles(exchange, state.symbol, '1h',  limit=50)
