@@ -26,6 +26,7 @@ def get_status():
     trades_serialized = [asdict(t) for t in state.trades]
     return {
         "running": state.running,
+        "sim_mode": state.sim_mode,
         "symbol": state.symbol,
         "timeframe": "15m",
         "risk_per_trade": state.risk_per_trade,
