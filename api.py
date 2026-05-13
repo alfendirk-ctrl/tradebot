@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import threading
+import time
 from bot import state, run_bot
 from dataclasses import asdict
 
@@ -40,6 +41,10 @@ def get_status():
         "open_trades": sum(1 for t in state.trades if t.status != "closed"),
         "closed_trades": sum(1 for t in state.trades if t.status == "closed"),
         "winning_trades": sum(1 for t in state.trades if t.status == "closed" and t.realized_pnl and t.realized_pnl > 0),
+        "consecutive_stops": state.consecutive_stops,
+        "circuit_breaker_active": bool(state.circuit_breaker_until and time.time() < state.circuit_breaker_until),
+        "circuit_breaker_until": state.circuit_breaker_until if state.circuit_breaker_until and time.time() < state.circuit_breaker_until else None,
+        "daily_loss_pct": round((state.equity - state.day_start_equity) / state.day_start_equity * 100, 2) if state.day_start_equity > 0 else 0.0,
     }
 
 @app.post("/start")

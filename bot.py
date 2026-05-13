@@ -2,11 +2,12 @@ import ccxt
 import time
 import logging
 import os
+import requests
 from datetime import datetime
 from typing import Optional
 from dataclasses import dataclass, field, asdict
 
-from strategy import analyze, Signal, get_swing_points
+from strategy import analyze, Signal, get_swing_points, calc_atr
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
@@ -30,15 +31,15 @@ class Trade:
     tp2_hit: bool = False
     tp3_hit: bool = False
     exit_price: Optional[float] = None
-    realized_pnl: float = 0.0  # opgebouwde PnL van partiële exits
+    realized_pnl: float = 0.0
 
 @dataclass
 class BotState:
     running: bool = False
     symbol: str = "BTC/USDT"
     risk_per_trade: float = 0.01
-    sim_mode: bool = True          # True = paper trading, False = live
-    sim_balance: float = 10000.0   # startkapitaal voor simulatie
+    sim_mode: bool = True
+    sim_balance: float = 10000.0
     trades: list = field(default_factory=list)
     last_signal: str = "none"
     last_setup: str = "none"
@@ -46,8 +47,30 @@ class BotState:
     balance: float = 0.0
     equity: float = 0.0
     total_pnl: float = 0.0
+    # Circuit breaker
+    consecutive_stops: int = 0
+    circuit_breaker_until: float = 0.0   # Unix timestamp; 0.0 = inactief
+    # Daily loss limit
+    day_date: str = ""
+    day_start_equity: float = 0.0
 
 state = BotState()
+
+
+def send_telegram(message: str):
+    token   = os.environ.get('TELEGRAM_BOT_TOKEN', '')
+    chat_id = os.environ.get('TELEGRAM_CHAT_ID', '')
+    if not token or not chat_id:
+        return
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": message, "parse_mode": "HTML"},
+            timeout=5,
+        )
+    except Exception as e:
+        logger.warning(f"Telegram melding mislukt: {e}")
+
 
 def get_exchange():
     api_key    = os.environ.get('OKX_API_KEY', '')
@@ -75,17 +98,22 @@ def get_exchange():
 def get_candles(exchange, symbol: str, timeframe: str, limit: int = 100):
     return exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
 
-def calculate_position_size(balance: float, entry: float, stop: float, risk_pct: float) -> float:
-    risk_amount = balance * risk_pct
+def calculate_position_size(balance: float, entry: float, stop: float,
+                             risk_pct: float, vol_scale: float = 1.0) -> float:
+    """
+    Positiegrootte op basis van risicobedrag.
+    vol_scale < 1 bij hoge volatiliteit (ATR14 > ATR50), > 1 bij lage volatiliteit.
+    Geclampt op [0.5, 2.0] zodat positie nooit meer dan verdubbelt of halveert.
+    """
+    risk_amount = balance * risk_pct * vol_scale
     risk_per_unit = abs(entry - stop)
     if risk_per_unit == 0:
         return 0
     return round(risk_amount / risk_per_unit, 6)
 
 def place_order(exchange, symbol: str, signal: Signal, qty: float) -> Optional[Trade]:
-    """Plaats order — echt of gesimuleerd afhankelijk van sim_mode."""
+    mode = "SIM" if state.sim_mode else "LIVE"
     if state.sim_mode:
-        # Paper trade: geen echte order, wel alles bijhouden
         trade = Trade(
             id=f"SIM-{len(state.trades)+1:04d}",
             symbol=symbol,
@@ -103,6 +131,13 @@ def place_order(exchange, symbol: str, signal: Signal, qty: float) -> Optional[T
         logger.info(
             f"[SIM] [{signal.setup_type.upper()}] {signal.side.upper()} {qty:.4f} {symbol} @ {signal.entry:.0f} | "
             f"SL={signal.stop_loss:.0f} | TP1={signal.tp1:.0f} | TP2={signal.tp2:.0f} | TP3={signal.tp3:.0f}"
+        )
+        send_telegram(
+            f"📈 <b>TRADE OPEN [{mode}]</b>\n"
+            f"{signal.setup_type.upper()} {signal.side.upper()} {qty:.4f} {symbol}\n"
+            f"Entry: {signal.entry:.0f} | SL: {signal.stop_loss:.0f}\n"
+            f"TP1: {signal.tp1:.0f} | TP2: {signal.tp2:.0f} | TP3: {signal.tp3:.0f}\n"
+            f"<i>{signal.reason}</i>"
         )
         return trade
     else:
@@ -125,6 +160,13 @@ def place_order(exchange, symbol: str, signal: Signal, qty: float) -> Optional[T
             logger.info(
                 f"[LIVE] [{signal.setup_type.upper()}] {signal.side.upper()} {qty} {symbol} @ {signal.entry:.0f} | "
                 f"SL={signal.stop_loss:.0f} | TP1={signal.tp1:.0f} | TP2={signal.tp2:.0f} | TP3={signal.tp3:.0f}"
+            )
+            send_telegram(
+                f"📈 <b>TRADE OPEN [{mode}]</b>\n"
+                f"{signal.setup_type.upper()} {signal.side.upper()} {qty} {symbol}\n"
+                f"Entry: {signal.entry:.0f} | SL: {signal.stop_loss:.0f}\n"
+                f"TP1: {signal.tp1:.0f} | TP2: {signal.tp2:.0f} | TP3: {signal.tp3:.0f}\n"
+                f"<i>{signal.reason}</i>"
             )
             return trade
         except Exception as e:
@@ -164,7 +206,6 @@ def trail_sl_to_structure(trade: Trade, candles: list, phase: int):
     swing_highs, swing_lows = get_swing_points(candles[:-1], lookback=3)
 
     if trade.side == "buy" and swing_lows:
-        # Meest recente swing low onder huidige prijs als nieuwe SL
         candidates = sorted(
             [p for _, p in swing_lows if p < candles[-1][4]],
             reverse=True
@@ -217,7 +258,6 @@ def manage_open_trades(exchange, candles_15m):
         )
 
         if hit_sl:
-            # Bepaal hoeveel er nog open staat
             remaining = 1.0
             if trade.tp1_hit: remaining -= 0.25
             if trade.tp2_hit: remaining -= 0.25
@@ -226,38 +266,73 @@ def manage_open_trades(exchange, candles_15m):
             trade.status = "closed"
             trade.exit_price = curr_price
 
+            state.consecutive_stops += 1
+            send_telegram(
+                f"❌ <b>SL HIT</b>\n"
+                f"{trade.setup_type.upper()} {trade.side.upper()} {trade.symbol}\n"
+                f"Entry: {trade.entry_price:.0f} → Exit: {curr_price:.0f}\n"
+                f"PnL: {trade.realized_pnl:+.2f} USDT | Stops op rij: {state.consecutive_stops}"
+            )
+
+            # Circuit breaker na 5 stops op rij
+            if state.consecutive_stops >= 5:
+                state.circuit_breaker_until = time.time() + 86400  # 24 uur
+                resume = datetime.utcfromtimestamp(state.circuit_breaker_until).strftime('%Y-%m-%d %H:%M UTC')
+                logger.warning(f"Circuit breaker actief tot {resume}")
+                send_telegram(
+                    f"🚨 <b>CIRCUIT BREAKER</b>\n"
+                    f"5 stops op rij — bot gepauzeerd.\n"
+                    f"Hervat om: {resume}"
+                )
+
         elif hit_tp1:
             partial_close(exchange, trade, 0.25, curr_price, "✅ TP1")
             trade.tp1_hit = True
             trade.status = "partial_1"
             trade.stop_loss = trade.entry_price  # → breakeven
+            state.consecutive_stops = 0
             logger.info(f"SL verschoven naar breakeven: {trade.entry_price:.0f}")
+            send_telegram(
+                f"✅ <b>TP1 GERAAKT</b>\n"
+                f"{trade.setup_type.upper()} {trade.side.upper()} @ {curr_price:.0f}\n"
+                f"PnL tot nu: {trade.realized_pnl:+.2f} USDT | SL → breakeven"
+            )
 
         elif hit_tp2:
             partial_close(exchange, trade, 0.25, curr_price, "✅ TP2")
             trade.tp2_hit = True
             trade.status = "partial_2"
             trail_sl_to_structure(trade, candles_15m, phase=2)
+            state.consecutive_stops = 0
+            send_telegram(
+                f"✅ <b>TP2 GERAAKT</b>\n"
+                f"{trade.setup_type.upper()} {trade.side.upper()} @ {curr_price:.0f}\n"
+                f"PnL tot nu: {trade.realized_pnl:+.2f} USDT | SL → swing PA"
+            )
 
         elif hit_tp3:
             partial_close(exchange, trade, 0.25, curr_price, "✅ TP3")
             trade.tp3_hit = True
             trade.status = "partial_3"
             trail_sl_to_structure(trade, candles_15m, phase=3)
+            state.consecutive_stops = 0
+            send_telegram(
+                f"✅ <b>TP3 GERAAKT</b>\n"
+                f"{trade.setup_type.upper()} {trade.side.upper()} @ {curr_price:.0f}\n"
+                f"PnL tot nu: {trade.realized_pnl:+.2f} USDT | Runner actief, SL trailend"
+            )
 
         elif trade.tp3_hit:
             # Runner fase: SL continu trailen op elke nieuwe candle
             trail_sl_to_structure(trade, candles_15m, phase=4)
 
 def run_bot():
-    # Simulatiemodus lezen uit environment variable
     state.sim_mode = os.environ.get('SIM_MODE', 'true').lower() == 'true'
     mode_label = "PAPER TRADING" if state.sim_mode else "LIVE TRADING"
 
     exchange = get_exchange()
     logger.info(f"DoopieCash Bot gestart | {state.symbol} | {mode_label}")
 
-    # Simulatiebalans instellen
     if state.sim_mode:
         state.sim_balance = float(os.environ.get('SIM_BALANCE', '10000'))
         state.balance = state.sim_balance
@@ -266,18 +341,38 @@ def run_bot():
 
     while state.running:
         try:
+            # ── Circuit breaker ────────────────────────────────────────────────
+            if state.circuit_breaker_until and time.time() < state.circuit_breaker_until:
+                resume = datetime.utcfromtimestamp(state.circuit_breaker_until).strftime('%H:%M UTC')
+                logger.info(f"Circuit breaker actief — hervat om {resume}")
+                time.sleep(60)
+                continue
+
+            # ── Balance ophalen ────────────────────────────────────────────────
             if state.sim_mode:
-                # In sim mode: alleen marktdata ophalen, geen balance call
                 state.balance = state.sim_balance + state.total_pnl
                 state.equity  = state.balance
             else:
-                balance_info  = exchange.fetch_balance()
+                balance_info = exchange.fetch_balance()
                 for currency in ['USDT', 'USDC', 'USD']:
                     if currency in balance_info and balance_info[currency]['total'] > 0:
                         state.balance = float(balance_info[currency]['free'])
                         state.equity  = float(balance_info[currency]['total'])
                         break
 
+            # ── Daily loss limit ───────────────────────────────────────────────
+            today = datetime.utcnow().strftime('%Y-%m-%d')
+            if state.day_date != today:
+                state.day_date = today
+                state.day_start_equity = state.equity
+
+            if state.day_start_equity > 0 and state.equity < state.day_start_equity * 0.97:
+                daily_pct = (state.equity - state.day_start_equity) / state.day_start_equity * 100
+                logger.warning(f"Daily loss limit bereikt ({daily_pct:.1f}%). Geen nieuwe trades vandaag.")
+                time.sleep(60)
+                continue
+
+            # ── Marktdata ─────────────────────────────────────────────────────
             candles_15m = get_candles(exchange, state.symbol, '15m', limit=100)
             candles_1h  = get_candles(exchange, state.symbol, '1h',  limit=50)
             last_ts = str(candles_15m[-1][0])
@@ -292,9 +387,16 @@ def run_bot():
                     if signal:
                         state.last_signal = signal.side
                         state.last_setup  = signal.setup_type
+
+                        # ATR-gebaseerde positiegrootte: kleinere positie bij hoge volatiliteit
+                        atr14 = calc_atr(candles_15m, 14)
+                        atr50 = calc_atr(candles_15m, min(50, len(candles_15m)))
+                        # vol_scale = atr50/atr14: bij hoge vol (atr14>atr50) → schaal <1, geclampt [0.5, 2.0]
+                        vol_scale = max(0.5, min(2.0, atr50 / atr14)) if atr14 > 0 else 1.0
+
                         qty = calculate_position_size(
                             state.balance, signal.entry,
-                            signal.stop_loss, state.risk_per_trade
+                            signal.stop_loss, state.risk_per_trade, vol_scale
                         )
                         if qty > 0:
                             trade = place_order(exchange, state.symbol, signal, qty)

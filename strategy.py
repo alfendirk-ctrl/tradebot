@@ -454,6 +454,13 @@ def check_rotation(candles, structure: str) -> Optional[Signal]:
             )
     return None
 
+# ─── ATR Helper ───────────────────────────────────────────────────────────────
+
+def calc_atr(candles: list, period: int = 14) -> float:
+    """Gemiddeld high−low bereik over de laatste `period` candles."""
+    n = min(period, len(candles))
+    return sum(abs(c[2] - c[3]) for c in candles[-n:]) / n if n > 0 else 0.0
+
 # ─── Main Analyzer ────────────────────────────────────────────────────────────
 
 def analyze(candles_15m: list, candles_1h: list, cooldown_candles: int = 0) -> Optional[Signal]:
@@ -492,7 +499,26 @@ def analyze(candles_15m: list, candles_1h: list, cooldown_candles: int = 0) -> O
     )
 
     if signal:
-        # Valideer minimum R:R van 3 (op tp3, niet tp2)
+        atr = calc_atr(candles_15m, 14)
+
+        # SL minimaal 1.5× ATR van entry
+        min_sl_dist = 1.5 * atr
+        sl_dist = abs(signal.entry - signal.stop_loss)
+        if sl_dist < min_sl_dist:
+            logger.info(f"SL vergroot: {sl_dist:.0f} → {min_sl_dist:.0f} (1.5× ATR={atr:.0f})")
+            signal.stop_loss = (
+                signal.entry - min_sl_dist if signal.side == 'buy'
+                else signal.entry + min_sl_dist
+            )
+
+        # TP volgorde afdwingen: long → oplopend, short → aflopend
+        tps = sorted([signal.tp1, signal.tp2, signal.tp3])
+        if signal.side == 'buy':
+            signal.tp1, signal.tp2, signal.tp3 = tps[0], tps[1], tps[2]
+        else:
+            signal.tp1, signal.tp2, signal.tp3 = tps[2], tps[1], tps[0]
+
+        # R:R valideren op tp3 (na SL-correctie)
         risk   = abs(signal.entry - signal.stop_loss)
         reward = abs(signal.tp3 - signal.entry)
         rr = reward / risk if risk > 0 else 0
