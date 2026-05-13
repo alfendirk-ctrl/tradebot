@@ -66,6 +66,40 @@ def stop_bot():
     state.running = False
     return {"message": "Bot stopping..."}
 
+@app.get("/stats")
+def get_stats():
+    closed = [t for t in state.trades if t.status == "closed"]
+
+    # Per-setup statistieken
+    setup_stats = {}
+    for setup in ["breakout", "range", "continuation", "rotation"]:
+        ts = [t for t in closed if t.setup_type == setup]
+        wins   = [t for t in ts if t.realized_pnl > 0]
+        losses = [t for t in ts if t.realized_pnl <= 0]
+        gross_profit = sum(t.realized_pnl for t in wins)
+        gross_loss   = abs(sum(t.realized_pnl for t in losses))
+        setup_stats[setup] = {
+            "count": len(ts),
+            "wins": len(wins),
+            "win_rate": round(len(wins) / len(ts) * 100) if ts else 0,
+            "avg_pnl": round(sum(t.realized_pnl for t in ts) / len(ts), 2) if ts else 0,
+            "profit_factor": round(gross_profit / gross_loss, 2) if gross_loss > 0 else None,
+        }
+
+    # Dagelijkse PnL gegroepeerd op datum (YYYY-MM-DD)
+    daily: dict = {}
+    for t in closed:
+        day = t.timestamp[:10]
+        daily[day] = round(daily.get(day, 0.0) + t.realized_pnl, 2)
+    daily_pnl = [{"date": k, "pnl": v} for k, v in sorted(daily.items())]
+
+    return {
+        "equity_history": state.equity_history,
+        "setup_stats": setup_stats,
+        "daily_pnl": daily_pnl,
+    }
+
+
 @app.get("/trades")
 def get_trades():
     return [asdict(t) for t in state.trades]

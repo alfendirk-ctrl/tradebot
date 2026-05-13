@@ -53,8 +53,20 @@ class BotState:
     # Daily loss limit
     day_date: str = ""
     day_start_equity: float = 0.0
+    # Equity history voor grafiek (max 500 punten)
+    equity_history: list = field(default_factory=list)
 
 state = BotState()
+
+
+def _record_equity():
+    snap = (state.sim_balance + state.total_pnl) if state.sim_mode else state.equity
+    state.equity_history.append({
+        "ts": datetime.utcnow().strftime("%d/%m %H:%M"),
+        "equity": round(snap, 2),
+    })
+    if len(state.equity_history) > 500:
+        state.equity_history.pop(0)
 
 
 def send_telegram(message: str):
@@ -271,6 +283,7 @@ def manage_open_trades(exchange, candles_15m):
             trade.status = "closed"
             trade.exit_price = curr_price
 
+            _record_equity()
             state.consecutive_stops += 1
             send_telegram(
                 f"❌ <b>SL HIT</b>\n"
@@ -295,6 +308,7 @@ def manage_open_trades(exchange, candles_15m):
             trade.tp1_hit = True
             trade.status = "partial_1"
             trade.stop_loss = trade.entry_price  # → breakeven
+            _record_equity()
             state.consecutive_stops = 0
             logger.info(f"SL verschoven naar breakeven: {trade.entry_price:.0f}")
             send_telegram(
@@ -308,6 +322,7 @@ def manage_open_trades(exchange, candles_15m):
             trade.tp2_hit = True
             trade.status = "partial_2"
             trail_sl_to_structure(trade, candles_15m, phase=2)
+            _record_equity()
             state.consecutive_stops = 0
             send_telegram(
                 f"✅ <b>TP2 GERAAKT</b>\n"
@@ -320,6 +335,7 @@ def manage_open_trades(exchange, candles_15m):
             trade.tp3_hit = True
             trade.status = "partial_3"
             trail_sl_to_structure(trade, candles_15m, phase=3)
+            _record_equity()
             state.consecutive_stops = 0
             send_telegram(
                 f"✅ <b>TP3 GERAAKT</b>\n"
