@@ -72,7 +72,12 @@ def send_telegram(message: str):
         logger.warning(f"Telegram melding mislukt: {e}")
 
 
+def get_public_exchange():
+    """Binance publieke API voor marktdata — geen auth nodig."""
+    return ccxt.binance({'options': {'defaultType': 'spot'}})
+
 def get_exchange():
+    """OKX met auth — alleen nodig in LIVE mode voor orderplaatsing."""
     api_key    = os.environ.get('OKX_API_KEY', '')
     secret     = os.environ.get('OKX_SECRET', '')
     passphrase = os.environ.get('OKX_PASSPHRASE', '')
@@ -330,7 +335,8 @@ def run_bot():
     state.sim_mode = os.environ.get('SIM_MODE', 'true').lower() == 'true'
     mode_label = "PAPER TRADING" if state.sim_mode else "LIVE TRADING"
 
-    exchange = get_exchange()
+    # SIM: Binance publieke API voor candles (geen auth). LIVE: OKX met auth.
+    exchange = get_public_exchange() if state.sim_mode else get_exchange()
     logger.info(f"DoopieCash Bot gestart | {state.symbol} | {mode_label}")
 
     if state.sim_mode:
