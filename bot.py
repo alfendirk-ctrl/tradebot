@@ -73,8 +73,8 @@ def send_telegram(message: str):
 
 
 def get_public_exchange():
-    """Binance publieke API voor marktdata — geen auth nodig."""
-    return ccxt.binance({'options': {'defaultType': 'spot'}})
+    """OKX publieke API voor marktdata — geen auth nodig."""
+    return ccxt.okx({'options': {'defaultType': 'spot'}})
 
 def get_exchange():
     """OKX met auth — alleen nodig in LIVE mode voor orderplaatsing."""
