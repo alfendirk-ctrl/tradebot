@@ -20,9 +20,31 @@ Risk management:
 
 from dataclasses import dataclass
 from typing import Optional
+from datetime import datetime, timezone
 import logging
 
 logger = logging.getLogger(__name__)
+
+# ─── Session Filter ────────────────────────────────────────────────────────────
+
+SESSIONS = {
+    'london': (8, 12),   # 08:00–12:00 UTC
+    'new_york': (13, 17), # 13:00–17:00 UTC
+}
+
+def in_active_session(dt: datetime = None) -> tuple[bool, str]:
+    """
+    Geeft (True, sessienaam) als de huidige UTC tijd binnen London of NY sessie valt.
+    Crypto heeft ook buiten deze tijden volume, maar de scherpste price action
+    en minste fake-outs vallen binnen deze windows.
+    """
+    if dt is None:
+        dt = datetime.now(timezone.utc)
+    hour = dt.hour
+    for name, (start, end) in SESSIONS.items():
+        if start <= hour < end:
+            return True, name
+    return False, 'off-hours'
 
 # ─── Dataclasses ───────────────────────────────────────────────────────────────
 
@@ -44,6 +66,8 @@ class Signal:
     # 25% blijft open als runner, SL trailend op marktstructuur
     reason: str
     confidence: float        # 0.0 - 1.0
+    session: str = 'unknown' # 'london' | 'new_york' | 'off-hours'
+    valid_until: str = ''    # ISO timestamp; na dit tijdstip is het signaal stale
 
 # ─── Market Structure ──────────────────────────────────────────────────────────
 
@@ -223,7 +247,78 @@ def find_tp_levels(entry: float, side: str, key_levels: list[Level], candles) ->
 
     return candidates[0], candidates[1], candidates[2]
 
-# ─── 4 Setup Detectors ────────────────────────────────────────────────────────
+# ─── 5 Setup Detectors ────────────────────────────────────────────────────────
+
+def check_liquidity_sweep(candles, key_levels: list[Level], structure: str) -> Optional[Signal]:
+    """
+    Liquidity Sweep setup:
+    - Wick steekt voorbij een key level (jaagt stops na)
+    - Candle sluit terug aan de andere kant van het level (fake-out bevestigd)
+    - Wick is minimaal 1.5× de body
+    - SL net voorbij de sweepwick, entry op close
+
+    Verschil met breakout: bij breakout verwacht je dat prijs doorloopt.
+    Bij een sweep verwacht je dat prijs keert — de doorbraak was een val.
+    """
+    if len(candles) < 10:
+        return None
+
+    curr  = candles[-1]
+    open_ = curr[1]
+    high  = curr[2]
+    low   = curr[3]
+    close = curr[4]
+    body  = abs(close - open_)
+    atr   = calc_atr(candles, 14)
+
+    # Minimale wickgrootte: 0.5× ATR zodat kleine wicks worden genegeerd
+    min_wick = atr * 0.5
+
+    for level in sorted(key_levels, key=lambda l: -l.strength):
+        lp = level.price
+
+        # ── Bullish sweep: wick onder support, sluit terug erboven ────────────
+        if structure in ('uptrend', 'ranging'):
+            lower_wick = min(open_, close) - low
+            swept_below = low < lp * 0.9995   # wick gaat door het level
+            closed_above = close > lp          # maar sluit erboven
+            wick_significant = lower_wick > max(body * 1.5, min_wick)
+            bullish_close = close > open_
+
+            if swept_below and closed_above and wick_significant and bullish_close:
+                sl = low * 0.9985              # net onder sweep-laagste punt
+                if close - sl < atr * 0.3:     # te kleine SL → skip
+                    continue
+                tp1, tp2, tp3 = find_tp_levels(close, 'buy', key_levels, candles)
+                return Signal(
+                    setup_type='liquidity_sweep', side='buy',
+                    entry=close, stop_loss=sl, tp1=tp1, tp2=tp2, tp3=tp3,
+                    reason=f"Bullish sweep onder {lp:.0f} (wick {lower_wick:.0f}, strength={level.strength})",
+                    confidence=min(0.76 + level.strength * 0.04, 0.95),
+                )
+
+        # ── Bearish sweep: wick boven resistance, sluit terug eronder ─────────
+        if structure in ('downtrend', 'ranging'):
+            upper_wick = high - max(open_, close)
+            swept_above  = high > lp * 1.0005  # wick gaat door het level
+            closed_below = close < lp           # maar sluit eronder
+            wick_significant = upper_wick > max(body * 1.5, min_wick)
+            bearish_close = close < open_
+
+            if swept_above and closed_below and wick_significant and bearish_close:
+                sl = high * 1.0015             # net boven sweep-hoogste punt
+                if sl - close < atr * 0.3:
+                    continue
+                tp1, tp2, tp3 = find_tp_levels(close, 'sell', key_levels, candles)
+                return Signal(
+                    setup_type='liquidity_sweep', side='sell',
+                    entry=close, stop_loss=sl, tp1=tp1, tp2=tp2, tp3=tp3,
+                    reason=f"Bearish sweep boven {lp:.0f} (wick {upper_wick:.0f}, strength={level.strength})",
+                    confidence=min(0.76 + level.strength * 0.04, 0.95),
+                )
+
+    return None
+
 
 def check_breakout(candles, key_levels: list[Level], structure: str) -> Optional[Signal]:
     """
@@ -463,13 +558,17 @@ def calc_atr(candles: list, period: int = 14) -> float:
 
 # ─── Main Analyzer ────────────────────────────────────────────────────────────
 
-def analyze(candles_15m: list, candles_1h: list, cooldown_candles: int = 0) -> Optional[Signal]:
+def analyze(candles_15m: list, candles_1h: list, cooldown_candles: int = 0,
+            candles_4h: list = None, session_filter: bool = True,
+            disabled_setups: list = None) -> Optional[Signal]:
     """
     Analyseer de markt op alle 4 DoopieCash setups.
-    Gebruikt 1h voor trendrichting, 15m voor instap.
+    Gebruikt 4h (indien opgegeven) als macro-bias, 1h voor trendrichting, 15m voor instap.
     Prioriteit: Rotation > Breakout > Continuation > Range
 
     cooldown_candles: aantal candles sinds laatste SL — geen trades tijdens cooldown.
+    candles_4h: optioneel; als opgegeven wordt alleen getraded in de richting van de 4h trend.
+    session_filter: als True, worden trades buiten London/NY sessie geweigerd.
     """
     if len(candles_15m) < 30 or len(candles_1h) < 20:
         logger.warning("Niet genoeg candles voor analyse")
@@ -479,26 +578,56 @@ def analyze(candles_15m: list, candles_1h: list, cooldown_candles: int = 0) -> O
     if cooldown_candles > 0 and cooldown_candles < 5:
         return None
 
+    # Session filter: alleen traden tijdens London en NY
+    now = datetime.now(timezone.utc)
+    active, session_name = in_active_session(now)
+    if session_filter and not active:
+        logger.info(f"Buiten actieve sessie ({session_name}) — geen nieuwe entries")
+        return None
+
+    # Macro-bias op 4h: trade alleen mee met de 4h trend
+    structure_4h = None
+    if candles_4h and len(candles_4h) >= 10:
+        structure_4h = get_market_structure(candles_4h)
+
     # Trend bepalen op 1h (hogere context)
     structure_1h  = get_market_structure(candles_1h)
     structure_15m = get_market_structure(candles_15m)
 
-    # Key levels op beide timeframes
+    # Key levels op alle beschikbare timeframes
     levels_1h  = find_key_levels(candles_1h)
     levels_15m = find_key_levels(candles_15m)
-    all_levels = levels_1h + levels_15m
+    levels_4h  = find_key_levels(candles_4h) if candles_4h and len(candles_4h) >= 10 else []
+    all_levels = levels_4h + levels_1h + levels_15m
 
-    logger.info(f"Structuur 1h: {structure_1h} | 15m: {structure_15m} | Levels: {len(all_levels)}")
+    logger.info(
+        f"Structuur 4h: {structure_4h or '—'} | 1h: {structure_1h} | 15m: {structure_15m} | "
+        f"Levels: {len(all_levels)} | Sessie: {session_name}"
+    )
 
-    # Check setups in volgorde van prioriteit
+    # Check setups in volgorde van prioriteit (sla uitgeschakelde setups over)
+    off = set(disabled_setups or [])
+    if off:
+        logger.info(f"Uitgeschakelde setups: {', '.join(off)}")
+
     signal = (
-        check_rotation(candles_15m, structure_1h) or
-        check_breakout(candles_15m, all_levels, structure_1h) or
-        check_continuation(candles_15m, all_levels, structure_1h) or
-        check_range(candles_15m, structure_1h)
+        (check_liquidity_sweep(candles_15m, all_levels, structure_1h) if 'liquidity_sweep' not in off else None) or
+        (check_rotation(candles_15m, structure_1h)                     if 'rotation'        not in off else None) or
+        (check_breakout(candles_15m, all_levels, structure_1h)         if 'breakout'        not in off else None) or
+        (check_continuation(candles_15m, all_levels, structure_1h)     if 'continuation'    not in off else None) or
+        (check_range(candles_15m, structure_1h)                        if 'range'           not in off else None)
     )
 
     if signal:
+        # 4h macro-bias filter: verwerp signals die tegen de 4h trend ingaan
+        if structure_4h and structure_4h != 'ranging':
+            if structure_4h == 'uptrend' and signal.side == 'sell':
+                logger.info(f"Signal afgewezen: {signal.setup_type} SHORT tegen 4h uptrend")
+                return None
+            if structure_4h == 'downtrend' and signal.side == 'buy':
+                logger.info(f"Signal afgewezen: {signal.setup_type} LONG tegen 4h downtrend")
+                return None
+
         atr = calc_atr(candles_15m, 14)
 
         # SL minimaal 1.5× ATR van entry
@@ -525,6 +654,17 @@ def analyze(candles_15m: list, candles_1h: list, cooldown_candles: int = 0) -> O
         if rr < 2.5:
             logger.info(f"Signal afgewezen: R:R te laag ({rr:.1f})")
             return None
-        logger.info(f"Signal: {signal.setup_type.upper()} {signal.side.upper()} | {signal.reason} | R:R={rr:.1f}")
+
+        # Sessie en expiry invullen op het signaal
+        signal.session = session_name
+        # Signaal is geldig voor 2 candles (30 min op 15m)
+        from datetime import timedelta
+        signal.valid_until = (now + timedelta(minutes=30)).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+        logger.info(
+            f"Signal: {signal.setup_type.upper()} {signal.side.upper()} | "
+            f"{signal.reason} | R:R={rr:.1f} | sessie={session_name} | "
+            f"geldig tot {signal.valid_until}"
+        )
 
     return signal

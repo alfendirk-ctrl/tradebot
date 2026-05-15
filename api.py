@@ -1,10 +1,18 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
+import os
 import threading
 import time
-from bot import state, run_bot
+from bot import state, run_bot, get_setup_health, SETUP_TYPES, get_public_exchange, get_exchange
 from dataclasses import asdict
+from db import clear_trades as db_clear_trades
+from backtest import (
+    BacktestConfig, backtest_state, run_backtest,
+    monte_carlo_state, run_monte_carlo,
+)
+import math
 
 app = FastAPI(title="BTC Trading Bot API")
 
@@ -45,6 +53,8 @@ def get_status():
         "circuit_breaker_active": bool(state.circuit_breaker_until and time.time() < state.circuit_breaker_until),
         "circuit_breaker_until": state.circuit_breaker_until if state.circuit_breaker_until and time.time() < state.circuit_breaker_until else None,
         "daily_loss_pct": round((state.equity - state.day_start_equity) / state.day_start_equity * 100, 2) if state.day_start_equity > 0 else 0.0,
+        "disabled_setups": state.disabled_setups,
+        "setup_health": {s: get_setup_health(s) for s in SETUP_TYPES},
     }
 
 @app.post("/start")
@@ -70,20 +80,24 @@ def stop_bot():
 def get_stats():
     closed = [t for t in state.trades if t.status == "closed"]
 
-    # Per-setup statistieken
+    # Per-setup statistieken + gezondheid
     setup_stats = {}
-    for setup in ["breakout", "range", "continuation", "rotation"]:
+    for setup in SETUP_TYPES:
         ts = [t for t in closed if t.setup_type == setup]
         wins   = [t for t in ts if t.realized_pnl > 0]
         losses = [t for t in ts if t.realized_pnl <= 0]
         gross_profit = sum(t.realized_pnl for t in wins)
         gross_loss   = abs(sum(t.realized_pnl for t in losses))
+        health = get_setup_health(setup)
         setup_stats[setup] = {
             "count": len(ts),
             "wins": len(wins),
             "win_rate": round(len(wins) / len(ts) * 100) if ts else 0,
             "avg_pnl": round(sum(t.realized_pnl for t in ts) / len(ts), 2) if ts else 0,
             "profit_factor": round(gross_profit / gross_loss, 2) if gross_loss > 0 else None,
+            "health": health['status'],
+            "recent_win_rate": round(health['win_rate'] * 100) if health['win_rate'] is not None else None,
+            "recent_trades": health['trades'],
         }
 
     # Dagelijkse PnL gegroepeerd op datum (YYYY-MM-DD)
@@ -93,10 +107,37 @@ def get_stats():
         daily[day] = round(daily.get(day, 0.0) + t.realized_pnl, 2)
     daily_pnl = [{"date": k, "pnl": v} for k, v in sorted(daily.items())]
 
+    # Sharpe ratio op basis van dagelijkse PnL (annualized, ≥2 dagen nodig)
+    sharpe = None
+    if len(daily_pnl) >= 2:
+        returns = [d['pnl'] for d in daily_pnl]
+        n = len(returns)
+        mean_r = sum(returns) / n
+        variance = sum((r - mean_r) ** 2 for r in returns) / (n - 1)
+        std_r = math.sqrt(variance) if variance > 0 else 0
+        if std_r > 0:
+            sharpe = round(mean_r / std_r * math.sqrt(252), 2)
+
+    # Max drawdown vanuit equity history
+    max_drawdown = None
+    if len(state.equity_history) >= 2:
+        equities = [e['equity'] for e in state.equity_history]
+        peak = equities[0]
+        max_dd = 0.0
+        for eq in equities:
+            if eq > peak:
+                peak = eq
+            dd = (peak - eq) / peak if peak > 0 else 0
+            if dd > max_dd:
+                max_dd = dd
+        max_drawdown = round(max_dd * 100, 2)  # als percentage
+
     return {
         "equity_history": state.equity_history,
         "setup_stats": setup_stats,
         "daily_pnl": daily_pnl,
+        "sharpe_ratio": sharpe,
+        "max_drawdown_pct": max_drawdown,
     }
 
 
@@ -110,4 +151,123 @@ def clear_trades():
         raise HTTPException(status_code=400, detail="Stop the bot before clearing trades")
     state.trades.clear()
     state.total_pnl = 0.0
+    db_clear_trades()
     return {"message": "Trade history cleared"}
+
+
+# ── Backtest endpoints ────────────────────────────────────────────────────────
+
+class BacktestRequest(BaseModel):
+    symbol: str           = "BTC/USDT"
+    days: int             = 90
+    test_pct: float       = 0.30
+    risk_per_trade: float = 0.01
+    starting_balance: float = 10000.0
+    session_filter: bool  = True
+
+def _run_backtest_thread(config: BacktestConfig):
+    try:
+        backtest_state.running  = True
+        backtest_state.error    = ""
+        backtest_state.result   = None
+        backtest_state.progress = 0.0
+        exchange = get_public_exchange() if state.sim_mode else get_exchange()
+        result = run_backtest(config, exchange)
+        backtest_state.result = asdict(result)
+    except Exception as e:
+        backtest_state.error = str(e)
+        import logging; logging.getLogger(__name__).error(f"Backtest mislukt: {e}")
+    finally:
+        backtest_state.running  = False
+        backtest_state.progress = 1.0
+
+@app.post("/backtest")
+def start_backtest(req: BacktestRequest):
+    if backtest_state.running:
+        raise HTTPException(status_code=400, detail="Backtest is al bezig")
+    config = BacktestConfig(
+        symbol=req.symbol,
+        days=req.days,
+        test_pct=req.test_pct,
+        risk_per_trade=req.risk_per_trade,
+        starting_balance=req.starting_balance,
+        session_filter=req.session_filter,
+    )
+    t = threading.Thread(target=_run_backtest_thread, args=(config,), daemon=True)
+    t.start()
+    return {"message": f"Backtest gestart: {req.symbol} | {req.days}d | test={int(req.test_pct*100)}%"}
+
+@app.get("/backtest")
+def get_backtest():
+    return {
+        "running":  backtest_state.running,
+        "progress": round(backtest_state.progress * 100),
+        "error":    backtest_state.error,
+        "result":   backtest_state.result,
+    }
+
+
+# ── Monte Carlo endpoints ─────────────────────────────────────────────────────
+
+class MonteCarloRequest(BaseModel):
+    n_simulations: int = 1000
+
+def _run_mc_thread(trade_pnls: list, starting_balance: float, n_simulations: int):
+    try:
+        monte_carlo_state.running  = True
+        monte_carlo_state.error    = ""
+        monte_carlo_state.result   = None
+        monte_carlo_state.progress = 0.0
+        from dataclasses import asdict as _asdict
+        result = run_monte_carlo(trade_pnls, starting_balance, n_simulations)
+        monte_carlo_state.result = _asdict(result)
+    except Exception as e:
+        monte_carlo_state.error = str(e)
+        import logging; logging.getLogger(__name__).error(f"Monte Carlo mislukt: {e}")
+    finally:
+        monte_carlo_state.running  = False
+        monte_carlo_state.progress = 1.0
+
+@app.post("/monte-carlo")
+def start_monte_carlo(req: MonteCarloRequest):
+    if monte_carlo_state.running:
+        raise HTTPException(status_code=400, detail="Monte Carlo is al bezig")
+    if not backtest_state.result:
+        raise HTTPException(status_code=400, detail="Voer eerst een backtest uit")
+    trades = backtest_state.result.get("trades", [])
+    pnls   = [t["realized_pnl"] for t in trades if t.get("realized_pnl") is not None]
+    if len(pnls) < 5:
+        raise HTTPException(status_code=400, detail=f"Te weinig trades ({len(pnls)}) — minimaal 5 nodig")
+    starting_balance = backtest_state.result.get("config", {}).get("starting_balance", 10000.0)
+    t = threading.Thread(
+        target=_run_mc_thread,
+        args=(pnls, starting_balance, req.n_simulations),
+        daemon=True,
+    )
+    t.start()
+    return {"message": f"Monte Carlo gestart: {req.n_simulations} simulaties op {len(pnls)} trades"}
+
+@app.get("/monte-carlo")
+def get_monte_carlo():
+    return {
+        "running":  monte_carlo_state.running,
+        "progress": round(monte_carlo_state.progress * 100),
+        "error":    monte_carlo_state.error,
+        "result":   monte_carlo_state.result,
+    }
+
+
+# ── SPA static files (dashboard/dist, built by nixpacks) ─────────────────────
+
+_DIST = os.path.join(os.path.dirname(__file__), "dashboard", "dist")
+
+@app.get("/", include_in_schema=False)
+async def spa_root():
+    return FileResponse(os.path.join(_DIST, "index.html"))
+
+@app.get("/{full_path:path}", include_in_schema=False)
+async def spa_fallback(full_path: str):
+    file = os.path.join(_DIST, full_path)
+    if os.path.isfile(file):
+        return FileResponse(file)
+    return FileResponse(os.path.join(_DIST, "index.html"))

@@ -8,6 +8,7 @@ from typing import Optional
 from dataclasses import dataclass, field, asdict
 
 from strategy import analyze, Signal, get_swing_points, calc_atr
+from db import init_db, save_trade, update_trade, load_trades, clear_trades as db_clear_trades
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
@@ -55,6 +56,10 @@ class BotState:
     day_start_equity: float = 0.0
     # Equity history voor grafiek (max 500 punten)
     equity_history: list = field(default_factory=list)
+    # Live price polling: timestamp van laatste 60s check
+    last_live_check: float = 0.0
+    # Setup gezondheid: setups die tijdelijk uitgeschakeld zijn
+    disabled_setups: list = field(default_factory=list)  # ['rotation', 'range', ...]
 
 state = BotState()
 
@@ -154,8 +159,10 @@ def place_order(exchange, symbol: str, signal: Signal, qty: float) -> Optional[T
             f"{signal.setup_type.upper()} {signal.side.upper()} {qty:.4f} {symbol}\n"
             f"Entry: {signal.entry:.0f} | SL: {signal.stop_loss:.0f}\n"
             f"TP1: {signal.tp1:.0f} | TP2: {signal.tp2:.0f} | TP3: {signal.tp3:.0f}\n"
+            f"Sessie: {signal.session} | Geldig tot: {signal.valid_until}\n"
             f"<i>{signal.reason}</i>"
         )
+        save_trade(asdict(trade))
         return trade
     else:
         try:
@@ -183,8 +190,10 @@ def place_order(exchange, symbol: str, signal: Signal, qty: float) -> Optional[T
                 f"{signal.setup_type.upper()} {signal.side.upper()} {qty} {symbol}\n"
                 f"Entry: {signal.entry:.0f} | SL: {signal.stop_loss:.0f}\n"
                 f"TP1: {signal.tp1:.0f} | TP2: {signal.tp2:.0f} | TP3: {signal.tp3:.0f}\n"
+                f"Sessie: {signal.session} | Geldig tot: {signal.valid_until}\n"
                 f"<i>{signal.reason}</i>"
             )
+            save_trade(asdict(trade))
             return trade
         except Exception as e:
             logger.error(f"Order mislukt: {e}")
@@ -282,6 +291,8 @@ def manage_open_trades(exchange, candles_15m):
             partial_close(exchange, trade, remaining, curr_price, "❌ SL")
             trade.status = "closed"
             trade.exit_price = curr_price
+            update_trade(asdict(trade))
+            _update_setup_health()
 
             _record_equity()
             state.consecutive_stops += 1
@@ -308,6 +319,7 @@ def manage_open_trades(exchange, candles_15m):
             trade.tp1_hit = True
             trade.status = "partial_1"
             trade.stop_loss = trade.entry_price  # → breakeven
+            update_trade(asdict(trade))
             _record_equity()
             state.consecutive_stops = 0
             logger.info(f"SL verschoven naar breakeven: {trade.entry_price:.0f}")
@@ -322,6 +334,7 @@ def manage_open_trades(exchange, candles_15m):
             trade.tp2_hit = True
             trade.status = "partial_2"
             trail_sl_to_structure(trade, candles_15m, phase=2)
+            update_trade(asdict(trade))
             _record_equity()
             state.consecutive_stops = 0
             send_telegram(
@@ -335,6 +348,7 @@ def manage_open_trades(exchange, candles_15m):
             trade.tp3_hit = True
             trade.status = "partial_3"
             trail_sl_to_structure(trade, candles_15m, phase=3)
+            update_trade(asdict(trade))
             _record_equity()
             state.consecutive_stops = 0
             send_telegram(
@@ -346,12 +360,106 @@ def manage_open_trades(exchange, candles_15m):
         elif trade.tp3_hit:
             # Runner fase: SL continu trailen op elke nieuwe candle
             trail_sl_to_structure(trade, candles_15m, phase=4)
+            update_trade(asdict(trade))
+
+SETUP_TYPES = ['liquidity_sweep', 'rotation', 'breakout', 'continuation', 'range']
+HEALTH_WINDOW      = 20   # aantal recente trades per setup om te beoordelen
+DISABLE_THRESHOLD  = 0.40 # win rate onder deze grens → disable
+RECOVERY_THRESHOLD = 0.50 # win rate boven deze grens → re-enable
+MIN_TRADES_TO_JUDGE = 10  # minimaal nodig voordat we een oordeel vellen
+
+
+def get_setup_health(setup: str) -> dict:
+    """
+    Bereken win rate en status voor een setup op basis van de laatste HEALTH_WINDOW trades.
+    Geeft: {'win_rate': float, 'trades': int, 'status': 'healthy'|'degrading'|'disabled'}
+    """
+    closed = [t for t in state.trades if t.status == "closed" and t.setup_type == setup]
+    recent = closed[-HEALTH_WINDOW:]
+    n = len(recent)
+    if n == 0:
+        return {'win_rate': None, 'trades': 0, 'status': 'healthy'}
+
+    wins = sum(1 for t in recent if t.realized_pnl > 0)
+    win_rate = wins / n
+
+    if setup in state.disabled_setups:
+        status = 'disabled'
+    elif n >= MIN_TRADES_TO_JUDGE and win_rate < DISABLE_THRESHOLD:
+        status = 'degrading'
+    else:
+        status = 'healthy'
+
+    return {'win_rate': round(win_rate, 3), 'trades': n, 'status': status}
+
+
+def _update_setup_health():
+    """
+    Controleer na elke gesloten trade of een setup gedegradeerd of hersteld is.
+    Schakelt automatisch uit bij win rate < 40% (≥10 trades) en weer in bij ≥50%.
+    """
+    for setup in SETUP_TYPES:
+        health = get_setup_health(setup)
+        n = health['trades']
+        wr = health['win_rate']
+        currently_disabled = setup in state.disabled_setups
+
+        if not currently_disabled and wr is not None and n >= MIN_TRADES_TO_JUDGE and wr < DISABLE_THRESHOLD:
+            state.disabled_setups.append(setup)
+            msg = (
+                f"⚠️ <b>SETUP UITGESCHAKELD: {setup.upper()}</b>\n"
+                f"Win rate laatste {n} trades: {wr*100:.0f}% (drempel: {DISABLE_THRESHOLD*100:.0f}%)\n"
+                f"Setup hervat automatisch zodra win rate ≥{RECOVERY_THRESHOLD*100:.0f}%"
+            )
+            logger.warning(f"Setup {setup} uitgeschakeld: win rate {wr*100:.0f}%")
+            send_telegram(msg)
+
+        elif currently_disabled and wr is not None and wr >= RECOVERY_THRESHOLD:
+            state.disabled_setups.remove(setup)
+            msg = (
+                f"✅ <b>SETUP HERSTELD: {setup.upper()}</b>\n"
+                f"Win rate laatste {n} trades: {wr*100:.0f}% — setup weer actief"
+            )
+            logger.info(f"Setup {setup} hersteld: win rate {wr*100:.0f}%")
+            send_telegram(msg)
+
+
+def _check_open_trades_live(exchange):
+    """
+    Live price check voor open trades — los van candle timing.
+    Wordt elke 60s aangeroepen via state.last_live_check.
+    Gebruikt dezelfde manage_open_trades logica maar met live ticker prijs.
+    """
+    open_trades = [t for t in state.trades if t.status != "closed"]
+    if not open_trades:
+        return
+    try:
+        ticker = exchange.fetch_ticker(state.symbol)
+        live_price = ticker['last']
+        # Maak een minimale fake candle met live prijs voor de TP/SL checks
+        fake_candle = [0, live_price, live_price, live_price, live_price, 0]
+        manage_open_trades(exchange, [fake_candle])
+    except Exception as e:
+        logger.warning(f"Live price check mislukt: {e}")
+
 
 def run_bot():
     state.sim_mode = os.environ.get('SIM_MODE', 'true').lower() == 'true'
     mode_label = "PAPER TRADING" if state.sim_mode else "LIVE TRADING"
 
-    # SIM: Binance publieke API voor candles (geen auth). LIVE: OKX met auth.
+    # DB initialiseren en bestaande trades laden
+    init_db()
+    saved_trades = load_trades()
+    if saved_trades:
+        from dataclasses import fields as dc_fields
+        trade_fields = {f.name for f in dc_fields(Trade)}
+        for td in saved_trades:
+            t = Trade(**{k: v for k, v in td.items() if k in trade_fields})
+            state.trades.append(t)
+            if t.status != "closed":
+                state.total_pnl += t.realized_pnl
+        logger.info(f"{len(saved_trades)} trades hersteld uit database")
+
     exchange = get_public_exchange() if state.sim_mode else get_exchange()
     logger.info(f"DoopieCash Bot gestart | {state.symbol} | {mode_label}")
 
@@ -394,9 +502,15 @@ def run_bot():
                 time.sleep(60)
                 continue
 
+            # ── Live price polling (elke 60s, los van candle timing) ──────────
+            if time.time() - state.last_live_check >= 60:
+                state.last_live_check = time.time()
+                _check_open_trades_live(exchange)
+
             # ── Marktdata ─────────────────────────────────────────────────────
             candles_15m = get_candles(exchange, state.symbol, '15m', limit=100)
             candles_1h  = get_candles(exchange, state.symbol, '1h',  limit=50)
+            candles_4h  = get_candles(exchange, state.symbol, '4h',  limit=30)
             last_ts = str(candles_15m[-1][0])
 
             if last_ts != state.last_candle_time:
@@ -405,7 +519,23 @@ def run_bot():
 
                 open_count = sum(1 for t in state.trades if t.status != "closed")
                 if open_count == 0:
-                    signal = analyze(candles_15m, candles_1h)
+                    signal = analyze(
+                        candles_15m, candles_1h,
+                        candles_4h=candles_4h,
+                        disabled_setups=state.disabled_setups,
+                    )
+
+                    # Signal expiry check: als entry >0.5% van huidige prijs afwijkt, verwerp
+                    if signal:
+                        curr_price = candles_15m[-1][4]
+                        entry_drift = abs(signal.entry - curr_price) / curr_price
+                        if entry_drift > 0.005:
+                            logger.info(
+                                f"Signal vervallen: entry {signal.entry:.0f} vs prijs {curr_price:.0f} "
+                                f"({entry_drift*100:.2f}% drift)"
+                            )
+                            signal = None
+
                     if signal:
                         state.last_signal = signal.side
                         state.last_setup  = signal.setup_type
@@ -413,7 +543,6 @@ def run_bot():
                         # ATR-gebaseerde positiegrootte: kleinere positie bij hoge volatiliteit
                         atr14 = calc_atr(candles_15m, 14)
                         atr50 = calc_atr(candles_15m, min(50, len(candles_15m)))
-                        # vol_scale = atr50/atr14: bij hoge vol (atr14>atr50) → schaal <1, geclampt [0.5, 2.0]
                         vol_scale = max(0.5, min(2.0, atr50 / atr14)) if atr14 > 0 else 1.0
 
                         qty = calculate_position_size(
