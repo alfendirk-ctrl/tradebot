@@ -29,6 +29,8 @@ VITE_API_URL=http://localhost:8000 npm run dev
 | `OKX_SANDBOX` | `true` for paper mode via OKX sandbox header |
 | `SIM_MODE` | `true` (default) = internal paper trading, no OKX orders placed |
 | `SIM_BALANCE` | Starting capital for sim mode (default `10000`) |
+| `TELEGRAM_BOT_TOKEN` | Optional — Telegram bot token for trade alerts |
+| `TELEGRAM_CHAT_ID` | Optional — Telegram chat ID for trade alerts |
 
 **Deployment:** `Procfile` runs `uvicorn api:app --host 0.0.0.0 --port $PORT` on Railway.
 
@@ -79,6 +81,7 @@ Thin FastAPI wrapper around `state` and `run_bot`. The bot runs in a `daemon=Tru
 - `POST /start` — accepts `BotConfig` (symbol, timeframe, risk_per_trade), starts thread
 - `POST /stop` — sets `state.running = False`
 - `GET /trades` / `DELETE /trades` — trade history
+- `GET /stats` — per-setup win rate / profit factor, daily PnL list, equity history for charts
 
 ### dashboard/src/App.jsx — React monitoring UI
 Single-file React SPA. Reads `VITE_API_URL` at build time (defaults to `http://localhost:8000`). Polls `/status` every 5 seconds. No build config files are in the repo — a `package.json` with Vite is expected but not committed.
@@ -89,3 +92,9 @@ Single-file React SPA. Reads `VITE_API_URL` at build time (defaults to `http://l
 - **Candle-level resolution.** All SL/TP checks use the candle close price, not tick-level prices. A trade can skip a TP level if price jumps.
 - **SL only moves in the favorable direction.** `trail_sl_to_structure` guards against moving SL against the trade.
 - **EEA / Netherlands users** must use `ccxt.myokx` (OKX's European entity). The code tries `myokx` first and falls back to `okx`.
+- **Volatility-scaled position sizing.** `calculate_position_size` accepts a `vol_scale` factor derived from ATR14/ATR50. When recent volatility (ATR14) is high relative to baseline (ATR50), position size shrinks; clamped to [0.5, 2.0].
+- **SL cooldown.** `analyze()` skips signal detection for 5 candles (75 min on 15m) after a stop loss hit, via the `cooldown_candles` parameter.
+- **Circuit breaker.** After 5 consecutive stop losses, `state.circuit_breaker_until` is set to `now + 86400s` and the bot loop sleeps until that timestamp.
+- **Daily loss limit.** If equity drops more than 3% from the day's starting equity, no new trades are taken for the rest of that UTC day.
+- **Sim mode uses OKX public API.** `get_public_exchange()` calls `ccxt.okx` without auth (market data only). `get_exchange()` requires credentials and is only called in live mode.
+- **No test suite.** There are no automated tests in this repo.
