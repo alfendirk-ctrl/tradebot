@@ -5,6 +5,7 @@ import threading
 import time
 from bot import state, run_bot
 from dataclasses import asdict
+from db import clear_trades as db_clear_trades
 
 app = FastAPI(title="BTC Trading Bot API")
 
@@ -110,4 +111,5 @@ def clear_trades():
         raise HTTPException(status_code=400, detail="Stop the bot before clearing trades")
     state.trades.clear()
     state.total_pnl = 0.0
+    db_clear_trades()
     return {"message": "Trade history cleared"}

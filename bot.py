@@ -8,6 +8,7 @@ from typing import Optional
 from dataclasses import dataclass, field, asdict
 
 from strategy import analyze, Signal, get_swing_points, calc_atr
+from db import init_db, save_trade, update_trade, load_trades, clear_trades as db_clear_trades
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
@@ -55,6 +56,8 @@ class BotState:
     day_start_equity: float = 0.0
     # Equity history voor grafiek (max 500 punten)
     equity_history: list = field(default_factory=list)
+    # Live price polling: timestamp van laatste 60s check
+    last_live_check: float = 0.0
 
 state = BotState()
 
@@ -157,6 +160,7 @@ def place_order(exchange, symbol: str, signal: Signal, qty: float) -> Optional[T
             f"Sessie: {signal.session} | Geldig tot: {signal.valid_until}\n"
             f"<i>{signal.reason}</i>"
         )
+        save_trade(asdict(trade))
         return trade
     else:
         try:
@@ -187,6 +191,7 @@ def place_order(exchange, symbol: str, signal: Signal, qty: float) -> Optional[T
                 f"Sessie: {signal.session} | Geldig tot: {signal.valid_until}\n"
                 f"<i>{signal.reason}</i>"
             )
+            save_trade(asdict(trade))
             return trade
         except Exception as e:
             logger.error(f"Order mislukt: {e}")
@@ -284,6 +289,7 @@ def manage_open_trades(exchange, candles_15m):
             partial_close(exchange, trade, remaining, curr_price, "❌ SL")
             trade.status = "closed"
             trade.exit_price = curr_price
+            update_trade(asdict(trade))
 
             _record_equity()
             state.consecutive_stops += 1
@@ -310,6 +316,7 @@ def manage_open_trades(exchange, candles_15m):
             trade.tp1_hit = True
             trade.status = "partial_1"
             trade.stop_loss = trade.entry_price  # → breakeven
+            update_trade(asdict(trade))
             _record_equity()
             state.consecutive_stops = 0
             logger.info(f"SL verschoven naar breakeven: {trade.entry_price:.0f}")
@@ -324,6 +331,7 @@ def manage_open_trades(exchange, candles_15m):
             trade.tp2_hit = True
             trade.status = "partial_2"
             trail_sl_to_structure(trade, candles_15m, phase=2)
+            update_trade(asdict(trade))
             _record_equity()
             state.consecutive_stops = 0
             send_telegram(
@@ -337,6 +345,7 @@ def manage_open_trades(exchange, candles_15m):
             trade.tp3_hit = True
             trade.status = "partial_3"
             trail_sl_to_structure(trade, candles_15m, phase=3)
+            update_trade(asdict(trade))
             _record_equity()
             state.consecutive_stops = 0
             send_telegram(
@@ -348,12 +357,44 @@ def manage_open_trades(exchange, candles_15m):
         elif trade.tp3_hit:
             # Runner fase: SL continu trailen op elke nieuwe candle
             trail_sl_to_structure(trade, candles_15m, phase=4)
+            update_trade(asdict(trade))
+
+def _check_open_trades_live(exchange):
+    """
+    Live price check voor open trades — los van candle timing.
+    Wordt elke 60s aangeroepen via state.last_live_check.
+    Gebruikt dezelfde manage_open_trades logica maar met live ticker prijs.
+    """
+    open_trades = [t for t in state.trades if t.status != "closed"]
+    if not open_trades:
+        return
+    try:
+        ticker = exchange.fetch_ticker(state.symbol)
+        live_price = ticker['last']
+        # Maak een minimale fake candle met live prijs voor de TP/SL checks
+        fake_candle = [0, live_price, live_price, live_price, live_price, 0]
+        manage_open_trades(exchange, [fake_candle])
+    except Exception as e:
+        logger.warning(f"Live price check mislukt: {e}")
+
 
 def run_bot():
     state.sim_mode = os.environ.get('SIM_MODE', 'true').lower() == 'true'
     mode_label = "PAPER TRADING" if state.sim_mode else "LIVE TRADING"
 
-    # SIM: Binance publieke API voor candles (geen auth). LIVE: OKX met auth.
+    # DB initialiseren en bestaande trades laden
+    init_db()
+    saved_trades = load_trades()
+    if saved_trades:
+        from dataclasses import fields as dc_fields
+        trade_fields = {f.name for f in dc_fields(Trade)}
+        for td in saved_trades:
+            t = Trade(**{k: v for k, v in td.items() if k in trade_fields})
+            state.trades.append(t)
+            if t.status != "closed":
+                state.total_pnl += t.realized_pnl
+        logger.info(f"{len(saved_trades)} trades hersteld uit database")
+
     exchange = get_public_exchange() if state.sim_mode else get_exchange()
     logger.info(f"DoopieCash Bot gestart | {state.symbol} | {mode_label}")
 
@@ -395,6 +436,11 @@ def run_bot():
                 logger.warning(f"Daily loss limit bereikt ({daily_pct:.1f}%). Geen nieuwe trades vandaag.")
                 time.sleep(60)
                 continue
+
+            # ── Live price polling (elke 60s, los van candle timing) ──────────
+            if time.time() - state.last_live_check >= 60:
+                state.last_live_check = time.time()
+                _check_open_trades_live(exchange)
 
             # ── Marktdata ─────────────────────────────────────────────────────
             candles_15m = get_candles(exchange, state.symbol, '15m', limit=100)
