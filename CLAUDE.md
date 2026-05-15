@@ -98,3 +98,32 @@ Single-file React SPA. Reads `VITE_API_URL` at build time (defaults to `http://l
 - **Daily loss limit.** If equity drops more than 3% from the day's starting equity, no new trades are taken for the rest of that UTC day.
 - **Sim mode uses OKX public API.** `get_public_exchange()` calls `ccxt.okx` without auth (market data only). `get_exchange()` requires credentials and is only called in live mode.
 - **No test suite.** There are no automated tests in this repo.
+
+## Roadmap
+
+Verbeteringen in volgorde van prioriteit, gebaseerd op analyse van het huidige systeem vs. referentiesystemen.
+
+### Fase 1 — Signaalkwaliteit (kleine wijzigingen, grote impact)
+- **Session filter** in `analyze()`: alleen trades tijdens London (08:00–12:00 UTC) en NY (13:00–17:00 UTC). Buiten die tijden meer fake-outs.
+- **Signal expiry**: als de entry >0.5% van de huidige prijs afwijkt op het moment van uitvoering, signaal verwerpen.
+- **H4 als macro-bias**: H4 candles ophalen naast 1H. Trades alleen in de richting van de H4 trend.
+
+### Fase 2 — Betrouwbaarheid
+- **SQLite persistence**: trades opslaan in `trades.db` zodat data niet verloren gaat bij een restart op Railway.
+- **Outcome polling elke 60s**: TP/SL checken op live prijs elke minuut, niet alleen op candle-close (elke 15 min is te traag).
+- **Per-setup win rate bijhouden** in `BotState`: rolling window over laatste N trades per setup type.
+
+### Fase 3 — Strategie gezondheid
+- **Auto-disable per setup**: als een setup de afgelopen 20 trades onder 40% win rate zakt, tijdelijk uitschakelen. Automatisch herstellen als historische performance terugkomt.
+- **Sharpe ratio + max drawdown** toevoegen aan `/stats` endpoint.
+
+### Fase 4 — Backtester
+- `backtest.py`: walk-forward backtest op historische OKX candles. Train op periode A, test op periode B. Geeft per setup: win rate, profit factor, Sharpe, max drawdown.
+- Nodig als basis voor alle verdere optimalisatie — zonder dit weet je niet of aanpassingen helpen of schaden.
+
+### Fase 5 — Liquidity Sweep setup
+- Nieuw setup type naast de bestaande vier. Een sweep gaat naar een key level, jaagt stops aan, en keert dan direct om (fake breakout). Anders dan onze `check_breakout()` die verwacht dat prijs door het level heen blijft.
+
+### Fase 6 — Monte Carlo validatie (later)
+- Pas zinvol als Fase 4 (backtester) draait en er voldoende historische trades zijn.
+- Shuffle trades 1000×, vergelijk met random strategie — als random wint, parameters weggooien.
