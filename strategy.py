@@ -247,7 +247,78 @@ def find_tp_levels(entry: float, side: str, key_levels: list[Level], candles) ->
 
     return candidates[0], candidates[1], candidates[2]
 
-# ─── 4 Setup Detectors ────────────────────────────────────────────────────────
+# ─── 5 Setup Detectors ────────────────────────────────────────────────────────
+
+def check_liquidity_sweep(candles, key_levels: list[Level], structure: str) -> Optional[Signal]:
+    """
+    Liquidity Sweep setup:
+    - Wick steekt voorbij een key level (jaagt stops na)
+    - Candle sluit terug aan de andere kant van het level (fake-out bevestigd)
+    - Wick is minimaal 1.5× de body
+    - SL net voorbij de sweepwick, entry op close
+
+    Verschil met breakout: bij breakout verwacht je dat prijs doorloopt.
+    Bij een sweep verwacht je dat prijs keert — de doorbraak was een val.
+    """
+    if len(candles) < 10:
+        return None
+
+    curr  = candles[-1]
+    open_ = curr[1]
+    high  = curr[2]
+    low   = curr[3]
+    close = curr[4]
+    body  = abs(close - open_)
+    atr   = calc_atr(candles, 14)
+
+    # Minimale wickgrootte: 0.5× ATR zodat kleine wicks worden genegeerd
+    min_wick = atr * 0.5
+
+    for level in sorted(key_levels, key=lambda l: -l.strength):
+        lp = level.price
+
+        # ── Bullish sweep: wick onder support, sluit terug erboven ────────────
+        if structure in ('uptrend', 'ranging'):
+            lower_wick = min(open_, close) - low
+            swept_below = low < lp * 0.9995   # wick gaat door het level
+            closed_above = close > lp          # maar sluit erboven
+            wick_significant = lower_wick > max(body * 1.5, min_wick)
+            bullish_close = close > open_
+
+            if swept_below and closed_above and wick_significant and bullish_close:
+                sl = low * 0.9985              # net onder sweep-laagste punt
+                if close - sl < atr * 0.3:     # te kleine SL → skip
+                    continue
+                tp1, tp2, tp3 = find_tp_levels(close, 'buy', key_levels, candles)
+                return Signal(
+                    setup_type='liquidity_sweep', side='buy',
+                    entry=close, stop_loss=sl, tp1=tp1, tp2=tp2, tp3=tp3,
+                    reason=f"Bullish sweep onder {lp:.0f} (wick {lower_wick:.0f}, strength={level.strength})",
+                    confidence=min(0.76 + level.strength * 0.04, 0.95),
+                )
+
+        # ── Bearish sweep: wick boven resistance, sluit terug eronder ─────────
+        if structure in ('downtrend', 'ranging'):
+            upper_wick = high - max(open_, close)
+            swept_above  = high > lp * 1.0005  # wick gaat door het level
+            closed_below = close < lp           # maar sluit eronder
+            wick_significant = upper_wick > max(body * 1.5, min_wick)
+            bearish_close = close < open_
+
+            if swept_above and closed_below and wick_significant and bearish_close:
+                sl = high * 1.0015             # net boven sweep-hoogste punt
+                if sl - close < atr * 0.3:
+                    continue
+                tp1, tp2, tp3 = find_tp_levels(close, 'sell', key_levels, candles)
+                return Signal(
+                    setup_type='liquidity_sweep', side='sell',
+                    entry=close, stop_loss=sl, tp1=tp1, tp2=tp2, tp3=tp3,
+                    reason=f"Bearish sweep boven {lp:.0f} (wick {upper_wick:.0f}, strength={level.strength})",
+                    confidence=min(0.76 + level.strength * 0.04, 0.95),
+                )
+
+    return None
+
 
 def check_breakout(candles, key_levels: list[Level], structure: str) -> Optional[Signal]:
     """
@@ -540,10 +611,11 @@ def analyze(candles_15m: list, candles_1h: list, cooldown_candles: int = 0,
         logger.info(f"Uitgeschakelde setups: {', '.join(off)}")
 
     signal = (
-        (check_rotation(candles_15m, structure_1h)              if 'rotation'     not in off else None) or
-        (check_breakout(candles_15m, all_levels, structure_1h)  if 'breakout'     not in off else None) or
-        (check_continuation(candles_15m, all_levels, structure_1h) if 'continuation' not in off else None) or
-        (check_range(candles_15m, structure_1h)                 if 'range'        not in off else None)
+        (check_liquidity_sweep(candles_15m, all_levels, structure_1h) if 'liquidity_sweep' not in off else None) or
+        (check_rotation(candles_15m, structure_1h)                     if 'rotation'        not in off else None) or
+        (check_breakout(candles_15m, all_levels, structure_1h)         if 'breakout'        not in off else None) or
+        (check_continuation(candles_15m, all_levels, structure_1h)     if 'continuation'    not in off else None) or
+        (check_range(candles_15m, structure_1h)                        if 'range'           not in off else None)
     )
 
     if signal:

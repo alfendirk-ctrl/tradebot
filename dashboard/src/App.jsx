@@ -35,10 +35,11 @@ const PHASES = {
 };
 
 const SETUP_META = [
-  { key: "breakout",     label: "Breakout",     desc: "Break + retest" },
-  { key: "range",        label: "Range",        desc: "Long/short extreme" },
-  { key: "continuation", label: "Continuation", desc: "Pullback constructie" },
-  { key: "rotation",     label: "Rotation",     desc: "Structuurbreuk" },
+  { key: "liquidity_sweep", label: "Liq. Sweep",   desc: "Fake-out op key level" },
+  { key: "rotation",        label: "Rotation",     desc: "Structuurbreuk" },
+  { key: "breakout",        label: "Breakout",     desc: "Break + retest" },
+  { key: "continuation",    label: "Continuation", desc: "Pullback constructie" },
+  { key: "range",           label: "Range",        desc: "Long/short extreme" },
 ];
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
@@ -674,7 +675,7 @@ function BacktestPanel() {
           )}
 
           {/* Per-setup breakdown */}
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 6 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 6 }}>
             {Object.entries(r.setup_stats || {}).map(([setup, d]) => (
               <div key={setup} style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: 6, padding: "8px 10px" }}>
                 <div style={{ fontSize: 9, color: C.blue, letterSpacing: 1, textTransform: "uppercase", marginBottom: 6 }}>{setup}</div>

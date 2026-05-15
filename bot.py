@@ -362,7 +362,7 @@ def manage_open_trades(exchange, candles_15m):
             trail_sl_to_structure(trade, candles_15m, phase=4)
             update_trade(asdict(trade))
 
-SETUP_TYPES = ['rotation', 'breakout', 'continuation', 'range']
+SETUP_TYPES = ['liquidity_sweep', 'rotation', 'breakout', 'continuation', 'range']
 HEALTH_WINDOW      = 20   # aantal recente trades per setup om te beoordelen
 DISABLE_THRESHOLD  = 0.40 # win rate onder deze grens → disable
 RECOVERY_THRESHOLD = 0.50 # win rate boven deze grens → re-enable
