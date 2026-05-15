@@ -20,9 +20,31 @@ Risk management:
 
 from dataclasses import dataclass
 from typing import Optional
+from datetime import datetime, timezone
 import logging
 
 logger = logging.getLogger(__name__)
+
+# ─── Session Filter ────────────────────────────────────────────────────────────
+
+SESSIONS = {
+    'london': (8, 12),   # 08:00–12:00 UTC
+    'new_york': (13, 17), # 13:00–17:00 UTC
+}
+
+def in_active_session(dt: datetime = None) -> tuple[bool, str]:
+    """
+    Geeft (True, sessienaam) als de huidige UTC tijd binnen London of NY sessie valt.
+    Crypto heeft ook buiten deze tijden volume, maar de scherpste price action
+    en minste fake-outs vallen binnen deze windows.
+    """
+    if dt is None:
+        dt = datetime.now(timezone.utc)
+    hour = dt.hour
+    for name, (start, end) in SESSIONS.items():
+        if start <= hour < end:
+            return True, name
+    return False, 'off-hours'
 
 # ─── Dataclasses ───────────────────────────────────────────────────────────────
 
@@ -44,6 +66,8 @@ class Signal:
     # 25% blijft open als runner, SL trailend op marktstructuur
     reason: str
     confidence: float        # 0.0 - 1.0
+    session: str = 'unknown' # 'london' | 'new_york' | 'off-hours'
+    valid_until: str = ''    # ISO timestamp; na dit tijdstip is het signaal stale
 
 # ─── Market Structure ──────────────────────────────────────────────────────────
 
@@ -463,13 +487,16 @@ def calc_atr(candles: list, period: int = 14) -> float:
 
 # ─── Main Analyzer ────────────────────────────────────────────────────────────
 
-def analyze(candles_15m: list, candles_1h: list, cooldown_candles: int = 0) -> Optional[Signal]:
+def analyze(candles_15m: list, candles_1h: list, cooldown_candles: int = 0,
+            candles_4h: list = None, session_filter: bool = True) -> Optional[Signal]:
     """
     Analyseer de markt op alle 4 DoopieCash setups.
-    Gebruikt 1h voor trendrichting, 15m voor instap.
+    Gebruikt 4h (indien opgegeven) als macro-bias, 1h voor trendrichting, 15m voor instap.
     Prioriteit: Rotation > Breakout > Continuation > Range
 
     cooldown_candles: aantal candles sinds laatste SL — geen trades tijdens cooldown.
+    candles_4h: optioneel; als opgegeven wordt alleen getraded in de richting van de 4h trend.
+    session_filter: als True, worden trades buiten London/NY sessie geweigerd.
     """
     if len(candles_15m) < 30 or len(candles_1h) < 20:
         logger.warning("Niet genoeg candles voor analyse")
@@ -479,16 +506,32 @@ def analyze(candles_15m: list, candles_1h: list, cooldown_candles: int = 0) -> O
     if cooldown_candles > 0 and cooldown_candles < 5:
         return None
 
+    # Session filter: alleen traden tijdens London en NY
+    now = datetime.now(timezone.utc)
+    active, session_name = in_active_session(now)
+    if session_filter and not active:
+        logger.info(f"Buiten actieve sessie ({session_name}) — geen nieuwe entries")
+        return None
+
+    # Macro-bias op 4h: trade alleen mee met de 4h trend
+    structure_4h = None
+    if candles_4h and len(candles_4h) >= 10:
+        structure_4h = get_market_structure(candles_4h)
+
     # Trend bepalen op 1h (hogere context)
     structure_1h  = get_market_structure(candles_1h)
     structure_15m = get_market_structure(candles_15m)
 
-    # Key levels op beide timeframes
+    # Key levels op alle beschikbare timeframes
     levels_1h  = find_key_levels(candles_1h)
     levels_15m = find_key_levels(candles_15m)
-    all_levels = levels_1h + levels_15m
+    levels_4h  = find_key_levels(candles_4h) if candles_4h and len(candles_4h) >= 10 else []
+    all_levels = levels_4h + levels_1h + levels_15m
 
-    logger.info(f"Structuur 1h: {structure_1h} | 15m: {structure_15m} | Levels: {len(all_levels)}")
+    logger.info(
+        f"Structuur 4h: {structure_4h or '—'} | 1h: {structure_1h} | 15m: {structure_15m} | "
+        f"Levels: {len(all_levels)} | Sessie: {session_name}"
+    )
 
     # Check setups in volgorde van prioriteit
     signal = (
@@ -499,6 +542,15 @@ def analyze(candles_15m: list, candles_1h: list, cooldown_candles: int = 0) -> O
     )
 
     if signal:
+        # 4h macro-bias filter: verwerp signals die tegen de 4h trend ingaan
+        if structure_4h and structure_4h != 'ranging':
+            if structure_4h == 'uptrend' and signal.side == 'sell':
+                logger.info(f"Signal afgewezen: {signal.setup_type} SHORT tegen 4h uptrend")
+                return None
+            if structure_4h == 'downtrend' and signal.side == 'buy':
+                logger.info(f"Signal afgewezen: {signal.setup_type} LONG tegen 4h downtrend")
+                return None
+
         atr = calc_atr(candles_15m, 14)
 
         # SL minimaal 1.5× ATR van entry
@@ -525,6 +577,17 @@ def analyze(candles_15m: list, candles_1h: list, cooldown_candles: int = 0) -> O
         if rr < 2.5:
             logger.info(f"Signal afgewezen: R:R te laag ({rr:.1f})")
             return None
-        logger.info(f"Signal: {signal.setup_type.upper()} {signal.side.upper()} | {signal.reason} | R:R={rr:.1f}")
+
+        # Sessie en expiry invullen op het signaal
+        signal.session = session_name
+        # Signaal is geldig voor 2 candles (30 min op 15m)
+        from datetime import timedelta
+        signal.valid_until = (now + timedelta(minutes=30)).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+        logger.info(
+            f"Signal: {signal.setup_type.upper()} {signal.side.upper()} | "
+            f"{signal.reason} | R:R={rr:.1f} | sessie={session_name} | "
+            f"geldig tot {signal.valid_until}"
+        )
 
     return signal

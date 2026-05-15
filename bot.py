@@ -154,6 +154,7 @@ def place_order(exchange, symbol: str, signal: Signal, qty: float) -> Optional[T
             f"{signal.setup_type.upper()} {signal.side.upper()} {qty:.4f} {symbol}\n"
             f"Entry: {signal.entry:.0f} | SL: {signal.stop_loss:.0f}\n"
             f"TP1: {signal.tp1:.0f} | TP2: {signal.tp2:.0f} | TP3: {signal.tp3:.0f}\n"
+            f"Sessie: {signal.session} | Geldig tot: {signal.valid_until}\n"
             f"<i>{signal.reason}</i>"
         )
         return trade
@@ -183,6 +184,7 @@ def place_order(exchange, symbol: str, signal: Signal, qty: float) -> Optional[T
                 f"{signal.setup_type.upper()} {signal.side.upper()} {qty} {symbol}\n"
                 f"Entry: {signal.entry:.0f} | SL: {signal.stop_loss:.0f}\n"
                 f"TP1: {signal.tp1:.0f} | TP2: {signal.tp2:.0f} | TP3: {signal.tp3:.0f}\n"
+                f"Sessie: {signal.session} | Geldig tot: {signal.valid_until}\n"
                 f"<i>{signal.reason}</i>"
             )
             return trade
@@ -397,6 +399,7 @@ def run_bot():
             # ── Marktdata ─────────────────────────────────────────────────────
             candles_15m = get_candles(exchange, state.symbol, '15m', limit=100)
             candles_1h  = get_candles(exchange, state.symbol, '1h',  limit=50)
+            candles_4h  = get_candles(exchange, state.symbol, '4h',  limit=30)
             last_ts = str(candles_15m[-1][0])
 
             if last_ts != state.last_candle_time:
@@ -405,7 +408,19 @@ def run_bot():
 
                 open_count = sum(1 for t in state.trades if t.status != "closed")
                 if open_count == 0:
-                    signal = analyze(candles_15m, candles_1h)
+                    signal = analyze(candles_15m, candles_1h, candles_4h=candles_4h)
+
+                    # Signal expiry check: als entry >0.5% van huidige prijs afwijkt, verwerp
+                    if signal:
+                        curr_price = candles_15m[-1][4]
+                        entry_drift = abs(signal.entry - curr_price) / curr_price
+                        if entry_drift > 0.005:
+                            logger.info(
+                                f"Signal vervallen: entry {signal.entry:.0f} vs prijs {curr_price:.0f} "
+                                f"({entry_drift*100:.2f}% drift)"
+                            )
+                            signal = None
+
                     if signal:
                         state.last_signal = signal.side
                         state.last_setup  = signal.setup_type
@@ -413,7 +428,6 @@ def run_bot():
                         # ATR-gebaseerde positiegrootte: kleinere positie bij hoge volatiliteit
                         atr14 = calc_atr(candles_15m, 14)
                         atr50 = calc_atr(candles_15m, min(50, len(candles_15m)))
-                        # vol_scale = atr50/atr14: bij hoge vol (atr14>atr50) → schaal <1, geclampt [0.5, 2.0]
                         vol_scale = max(0.5, min(2.0, atr50 / atr14)) if atr14 > 0 else 1.0
 
                         qty = calculate_position_size(
