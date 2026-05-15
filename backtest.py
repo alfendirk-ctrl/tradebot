@@ -15,6 +15,7 @@ Vereenvoudiging t.o.v. live bot:
 """
 
 import math
+import random
 import time
 import logging
 from dataclasses import dataclass, field, asdict
@@ -84,6 +85,49 @@ class BacktestState:
     error: str               = ""
 
 backtest_state = BacktestState()
+
+
+# ─── Monte Carlo dataclasses ───────────────────────────────────────────────────
+
+@dataclass
+class MonteCarloResult:
+    n_simulations: int           = 0
+    n_trades: int                = 0
+    actual_pnl: float            = 0.0
+    actual_max_dd: float         = 0.0
+    actual_sharpe: Optional[float] = None
+
+    # Bootstrap CI (resample with replacement)
+    bootstrap_pnl_p5:   float   = 0.0
+    bootstrap_pnl_p50:  float   = 0.0
+    bootstrap_pnl_p95:  float   = 0.0
+    bootstrap_dd_p50:   float   = 0.0
+    bootstrap_dd_p95:   float   = 0.0
+    bootstrap_positive_pct: float = 0.0  # % of bootstrap samples with PnL > 0
+
+    # Random-strategy baseline (coin-flip with same avg win/loss)
+    random_pnl_p5:    float     = 0.0
+    random_pnl_p50:   float     = 0.0
+    random_pnl_p95:   float     = 0.0
+    percentile_vs_random: float = 0.0   # actual beats X% of random
+
+    # Verdict
+    has_edge: bool  = False
+    verdict: str    = ""
+
+    # Histogram: random-baseline distribution with actual marked
+    pnl_histogram: list = field(default_factory=list)
+
+    duration_s: float = 0.0
+
+@dataclass
+class MonteCarloState:
+    running:  bool          = False
+    progress: float         = 0.0
+    result:   Optional[dict] = None
+    error:    str           = ""
+
+monte_carlo_state = MonteCarloState()
 
 
 # ─── Helpers ───────────────────────────────────────────────────────────────────
@@ -205,6 +249,153 @@ def _manage_trade(trade: BtTrade, candle_close: float,
         _trail_sl(trade, candles_window)
 
     return pnl_delta
+
+
+# ─── Monte Carlo helpers ──────────────────────────────────────────────────────
+
+def _mc_max_drawdown(pnls: list, start: float) -> float:
+    eq, peak, max_dd = start, start, 0.0
+    for pnl in pnls:
+        eq += pnl
+        if eq > peak:
+            peak = eq
+        if peak > 0:
+            dd = (peak - eq) / peak
+            if dd > max_dd:
+                max_dd = dd
+    return max_dd * 100.0
+
+
+def _mc_sharpe(pnls: list) -> Optional[float]:
+    if len(pnls) < 2:
+        return None
+    n = len(pnls)
+    mean_r = sum(pnls) / n
+    var = sum((r - mean_r) ** 2 for r in pnls) / (n - 1)
+    std_r = math.sqrt(var) if var > 0 else 0.0
+    return round(mean_r / std_r * math.sqrt(n), 2) if std_r > 0 else None
+
+
+def _percentile(sorted_arr: list, p: float) -> float:
+    if not sorted_arr:
+        return 0.0
+    idx = max(0, min(int(len(sorted_arr) * p / 100), len(sorted_arr) - 1))
+    return sorted_arr[idx]
+
+
+def run_monte_carlo(
+    trade_pnls: list,
+    starting_balance: float = 10000.0,
+    n_simulations: int = 1000,
+) -> MonteCarloResult:
+    """
+    Two-pronged Monte Carlo validation:
+    1. Bootstrap (resample with replacement) → CI around actual metrics.
+    2. Random-strategy baseline (coin-flip with same avg win/loss amounts)
+       → percentile rank of actual vs. luck.
+    """
+    t_start = time.time()
+    result  = MonteCarloResult(n_simulations=n_simulations, n_trades=len(trade_pnls))
+
+    if len(trade_pnls) < 5:
+        raise ValueError("Minimaal 5 trades nodig voor Monte Carlo analyse")
+
+    result.actual_pnl    = round(sum(trade_pnls), 2)
+    result.actual_max_dd = round(_mc_max_drawdown(trade_pnls, starting_balance), 2)
+    result.actual_sharpe = _mc_sharpe(trade_pnls)
+
+    rng  = random.Random(42)
+    n    = len(trade_pnls)
+
+    wins   = [p for p in trade_pnls if p > 0]
+    losses = [p for p in trade_pnls if p <= 0]
+    avg_win  = sum(wins)   / len(wins)   if wins   else 0.0
+    avg_loss = sum(losses) / len(losses) if losses else 0.0
+
+    # ── 1. Bootstrap (resample with replacement) ──────────────────────────────
+    boot_pnls: list[float] = []
+    boot_dds:  list[float] = []
+
+    for i in range(n_simulations):
+        monte_carlo_state.progress = 0.1 + 0.45 * (i / n_simulations)
+        sample = [rng.choice(trade_pnls) for _ in range(n)]
+        boot_pnls.append(round(sum(sample), 2))
+        boot_dds.append(round(_mc_max_drawdown(sample, starting_balance), 2))
+
+    sorted_bpnl = sorted(boot_pnls)
+    sorted_bdd  = sorted(boot_dds)
+
+    result.bootstrap_pnl_p5   = _percentile(sorted_bpnl,  5)
+    result.bootstrap_pnl_p50  = _percentile(sorted_bpnl, 50)
+    result.bootstrap_pnl_p95  = _percentile(sorted_bpnl, 95)
+    result.bootstrap_dd_p50   = _percentile(sorted_bdd,  50)
+    result.bootstrap_dd_p95   = _percentile(sorted_bdd,  95)
+    result.bootstrap_positive_pct = round(
+        sum(1 for p in boot_pnls if p > 0) / n_simulations * 100, 1
+    )
+
+    # ── 2. Random strategy baseline (coin-flip) ───────────────────────────────
+    rand_pnls: list[float] = []
+
+    for i in range(n_simulations):
+        monte_carlo_state.progress = 0.55 + 0.40 * (i / n_simulations)
+        sim_pnl = sum(
+            avg_win if rng.random() < 0.5 else avg_loss
+            for _ in range(n)
+        )
+        rand_pnls.append(round(sim_pnl, 2))
+
+    sorted_rpnl = sorted(rand_pnls)
+    result.random_pnl_p5  = _percentile(sorted_rpnl,  5)
+    result.random_pnl_p50 = _percentile(sorted_rpnl, 50)
+    result.random_pnl_p95 = _percentile(sorted_rpnl, 95)
+
+    beats_random = sum(1 for p in rand_pnls if p < result.actual_pnl)
+    result.percentile_vs_random = round(beats_random / n_simulations * 100, 1)
+
+    # ── Verdict ───────────────────────────────────────────────────────────────
+    strong_edge  = result.percentile_vs_random >= 95 and result.bootstrap_positive_pct >= 70
+    weak_edge    = result.percentile_vs_random >= 80 or  result.bootstrap_positive_pct >= 60
+    result.has_edge = strong_edge
+    if strong_edge:
+        result.verdict = "Statistisch voordeel aangetoond"
+    elif weak_edge:
+        result.verdict = "Twijfelachtig — meer trades nodig"
+    else:
+        result.verdict = "Geen statistisch voordeel — parameters herzien"
+
+    # ── Histogram of random baseline ─────────────────────────────────────────
+    all_values = sorted_rpnl + [result.actual_pnl]
+    min_v = min(all_values)
+    max_v = max(all_values)
+    span  = max_v - min_v or 1.0
+    n_buckets   = 20
+    bucket_size = span / n_buckets
+
+    buckets = [0] * n_buckets
+    for p in rand_pnls:
+        idx = min(int((p - min_v) / bucket_size), n_buckets - 1)
+        buckets[idx] += 1
+
+    actual_bucket = min(int((result.actual_pnl - min_v) / bucket_size), n_buckets - 1)
+
+    result.pnl_histogram = [
+        {
+            "bucket_center": round(min_v + (i + 0.5) * bucket_size, 0),
+            "count": buckets[i],
+            "is_actual": i == actual_bucket,
+        }
+        for i in range(n_buckets)
+    ]
+
+    result.duration_s = round(time.time() - t_start, 2)
+
+    logger.info(
+        f"Monte Carlo klaar in {result.duration_s}s | "
+        f"{n_simulations} sims | rank={result.percentile_vs_random}% | "
+        f"edge={result.has_edge}"
+    )
+    return result
 
 
 # ─── Main Backtester ───────────────────────────────────────────────────────────

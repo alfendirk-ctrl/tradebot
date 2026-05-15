@@ -767,6 +767,193 @@ function BacktestPanel() {
   );
 }
 
+// ─── Monte Carlo Panel ────────────────────────────────────────────────────────
+
+function MonteCarloPanel() {
+  const [mc,      setMc]      = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [sims,    setSims]    = useState(1000);
+
+  const pollMc = useCallback(async () => {
+    const res  = await fetch(`${API_URL}/monte-carlo`);
+    const data = await res.json();
+    setMc(data);
+    if (data.running) setTimeout(pollMc, 1500);
+  }, []);
+
+  async function startMc() {
+    setLoading(true);
+    const res = await fetch(`${API_URL}/monte-carlo`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ n_simulations: sims }),
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      setMc({ error: err.detail, running: false, progress: 0, result: null });
+      setLoading(false);
+      return;
+    }
+    setLoading(false);
+    pollMc();
+  }
+
+  useEffect(() => { pollMc(); }, [pollMc]);
+
+  const r = mc?.result;
+
+  const verdictStyle = r ? (
+    r.has_edge
+      ? { color: C.green, bg: C.greenBg }
+      : r.percentile_vs_random >= 80
+        ? { color: C.yellow, bg: C.yellowBg }
+        : { color: C.red,    bg: C.redBg    }
+  ) : null;
+
+  return (
+    <div style={{ background: C.card, borderRadius: 14, padding: 20, boxShadow: C.shadow, marginBottom: 20 }}>
+      <SectionLabel>Monte Carlo Validatie</SectionLabel>
+
+      <div style={{ display: "flex", gap: 10, alignItems: "flex-end", marginBottom: 14, flexWrap: "wrap" }}>
+        <label style={{ flex: 1, minWidth: 90 }}>
+          <div style={{ fontSize: 9, color: C.muted, marginBottom: 4, letterSpacing: 1, textTransform: "uppercase" }}>Simulaties</div>
+          <select value={sims} onChange={e => setSims(+e.target.value)} disabled={mc?.running}>
+            {[500, 1000, 2000, 5000].map(n => <option key={n} value={n}>{n.toLocaleString()}</option>)}
+          </select>
+        </label>
+        <button className="btn-primary" onClick={startMc}
+          disabled={mc?.running || loading}
+          style={{ flex: 2, minWidth: 180 }}>
+          {mc?.running ? `${mc.progress}% bezig…` : "▶  Run Monte Carlo"}
+        </button>
+      </div>
+
+      {!r && !mc?.running && (
+        <div style={{ fontSize: 10, color: C.muted, fontStyle: "italic" }}>
+          Voer eerst een backtest uit, daarna Monte Carlo voor statistische validatie.
+        </div>
+      )}
+
+      {mc?.running && (
+        <div style={{ height: 5, background: C.border, borderRadius: 99, overflow: "hidden", marginBottom: 12 }}>
+          <div style={{ height: "100%", width: `${mc.progress}%`, background: C.blue, borderRadius: 99, transition: "width 0.3s" }} />
+        </div>
+      )}
+
+      {mc?.error && <div style={{ color: C.red, fontSize: 11, marginBottom: 10 }}>⚠ {mc.error}</div>}
+
+      {r && (
+        <>
+          {/* Verdict */}
+          <div style={{
+            display: "flex", alignItems: "center", gap: 12, marginBottom: 18,
+            background: verdictStyle.bg, borderRadius: 10, padding: "12px 16px",
+            border: `1px solid ${verdictStyle.color}33`,
+          }}>
+            <div style={{ fontSize: 20 }}>
+              {r.has_edge ? "✅" : r.percentile_vs_random >= 80 ? "⚠️" : "❌"}
+            </div>
+            <div>
+              <div style={{ fontSize: 12, fontWeight: 700, color: verdictStyle.color }}>{r.verdict}</div>
+              <div style={{ fontSize: 10, color: C.muted, marginTop: 2 }}>
+                {r.n_trades} trades · {r.n_simulations.toLocaleString()} simulaties · {r.duration_s}s
+              </div>
+            </div>
+          </div>
+
+          {/* Key metrics row */}
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 16 }}>
+            {[
+              {
+                label:  "Actuele PnL",
+                value:  fmtSign(r.actual_pnl),
+                color:  r.actual_pnl >= 0 ? C.green : C.red,
+                sub:    "backtest resultaat",
+              },
+              {
+                label:  "Bootstrap CI (90%)",
+                value:  `${fmtSign(r.bootstrap_pnl_p5)} – ${fmtSign(r.bootstrap_pnl_p95)}`,
+                color:  r.bootstrap_pnl_p5 >= 0 ? C.green : C.yellow,
+                sub:    "bandbreedte bij hersampling",
+              },
+              {
+                label:  "Positieve kans",
+                value:  `${r.bootstrap_positive_pct}%`,
+                color:  r.bootstrap_positive_pct >= 70 ? C.green : r.bootstrap_positive_pct >= 50 ? C.yellow : C.red,
+                sub:    "bootstrap samples > $0",
+              },
+              {
+                label:  "Rang vs. willekeurig",
+                value:  `${r.percentile_vs_random}e percentiel`,
+                color:  r.percentile_vs_random >= 95 ? C.green : r.percentile_vs_random >= 80 ? C.yellow : C.red,
+                sub:    "vs. coin-flip strategie",
+              },
+              {
+                label:  "Max DD (actueel)",
+                value:  `-${r.actual_max_dd}%`,
+                color:  r.actual_max_dd > 20 ? C.red : C.muted,
+                sub:    `mediaan random: -${r.bootstrap_dd_p50}%`,
+              },
+            ].map(s => (
+              <div key={s.label} style={{
+                flex: 1, minWidth: 120,
+                background: "#fafbfd", border: `1px solid ${C.border}`,
+                borderRadius: 10, padding: "10px 14px",
+              }}>
+                <div style={{ fontSize: 8, color: C.muted, letterSpacing: 1, textTransform: "uppercase", marginBottom: 4 }}>{s.label}</div>
+                <div style={{ fontSize: 13, fontWeight: 700, color: s.color }}>{s.value}</div>
+                {s.sub && <div style={{ fontSize: 9, color: C.dim, marginTop: 3 }}>{s.sub}</div>}
+              </div>
+            ))}
+          </div>
+
+          {/* Histogram */}
+          {r.pnl_histogram?.length > 0 && (
+            <div>
+              <div style={{ fontSize: 9, color: C.muted, letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>
+                PnL-verdeling willekeurige strategie — blauwe balk = actueel resultaat
+              </div>
+              <ResponsiveContainer width="100%" height={120}>
+                <BarChart data={r.pnl_histogram} margin={{ top: 2, right: 4, left: -28, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke={C.border} vertical={false} />
+                  <XAxis dataKey="bucket_center" stroke="transparent"
+                    tick={{ fill: C.dim, fontSize: 8 }} tickLine={false}
+                    tickFormatter={v => `$${Math.round(v / 100) * 100}`}
+                    interval={3} />
+                  <YAxis stroke="transparent" tick={{ fill: C.dim, fontSize: 8 }} tickLine={false} axisLine={false} />
+                  <Tooltip
+                    content={({ active, payload }) => {
+                      if (!active || !payload?.length) return null;
+                      const d = payload[0].payload;
+                      return (
+                        <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 8, padding: "6px 10px", fontSize: 10 }}>
+                          <div style={{ color: C.muted, fontSize: 9 }}>~${Math.round(d.bucket_center)}</div>
+                          <div style={{ fontWeight: 700, color: d.is_actual ? C.blue : C.text }}>{d.count} simulaties{d.is_actual ? " ← actueel" : ""}</div>
+                        </div>
+                      );
+                    }}
+                  />
+                  <Bar dataKey="count" radius={[3, 3, 0, 0]} maxBarSize={40} animationDuration={400}>
+                    {r.pnl_histogram.map((entry, i) => (
+                      <Cell key={i}
+                        fill={entry.is_actual ? C.blue : C.border}
+                        fillOpacity={entry.is_actual ? 1 : 0.75}
+                      />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+              <div style={{ fontSize: 9, color: C.dim, marginTop: 6, textAlign: "center" }}>
+                Willekeurige mediaan: {fmtSign(r.random_pnl_p50)} · 95e percentiel: {fmtSign(r.random_pnl_p95)}
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 // ─── Main Dashboard ───────────────────────────────────────────────────────────
 
 export default function Dashboard() {
@@ -964,6 +1151,9 @@ export default function Dashboard() {
 
       {/* ── Backtest ───────────────────────────────────────────────────────── */}
       <BacktestPanel />
+
+      {/* ── Monte Carlo ────────────────────────────────────────────────────── */}
+      <MonteCarloPanel />
 
       {/* ── Closed trades ──────────────────────────────────────────────────── */}
       <SectionLabel badge={closedTrades.length}>Gesloten trades</SectionLabel>

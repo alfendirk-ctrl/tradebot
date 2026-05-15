@@ -6,7 +6,10 @@ import time
 from bot import state, run_bot, get_setup_health, SETUP_TYPES, get_public_exchange, get_exchange
 from dataclasses import asdict
 from db import clear_trades as db_clear_trades
-from backtest import BacktestConfig, backtest_state, run_backtest
+from backtest import (
+    BacktestConfig, backtest_state, run_backtest,
+    monte_carlo_state, run_monte_carlo,
+)
 import math
 
 app = FastAPI(title="BTC Trading Bot API")
@@ -199,4 +202,54 @@ def get_backtest():
         "progress": round(backtest_state.progress * 100),
         "error":    backtest_state.error,
         "result":   backtest_state.result,
+    }
+
+
+# ── Monte Carlo endpoints ─────────────────────────────────────────────────────
+
+class MonteCarloRequest(BaseModel):
+    n_simulations: int = 1000
+
+def _run_mc_thread(trade_pnls: list, starting_balance: float, n_simulations: int):
+    try:
+        monte_carlo_state.running  = True
+        monte_carlo_state.error    = ""
+        monte_carlo_state.result   = None
+        monte_carlo_state.progress = 0.0
+        from dataclasses import asdict as _asdict
+        result = run_monte_carlo(trade_pnls, starting_balance, n_simulations)
+        monte_carlo_state.result = _asdict(result)
+    except Exception as e:
+        monte_carlo_state.error = str(e)
+        import logging; logging.getLogger(__name__).error(f"Monte Carlo mislukt: {e}")
+    finally:
+        monte_carlo_state.running  = False
+        monte_carlo_state.progress = 1.0
+
+@app.post("/monte-carlo")
+def start_monte_carlo(req: MonteCarloRequest):
+    if monte_carlo_state.running:
+        raise HTTPException(status_code=400, detail="Monte Carlo is al bezig")
+    if not backtest_state.result:
+        raise HTTPException(status_code=400, detail="Voer eerst een backtest uit")
+    trades = backtest_state.result.get("trades", [])
+    pnls   = [t["realized_pnl"] for t in trades if t.get("realized_pnl") is not None]
+    if len(pnls) < 5:
+        raise HTTPException(status_code=400, detail=f"Te weinig trades ({len(pnls)}) — minimaal 5 nodig")
+    starting_balance = backtest_state.result.get("config", {}).get("starting_balance", 10000.0)
+    t = threading.Thread(
+        target=_run_mc_thread,
+        args=(pnls, starting_balance, req.n_simulations),
+        daemon=True,
+    )
+    t.start()
+    return {"message": f"Monte Carlo gestart: {req.n_simulations} simulaties op {len(pnls)} trades"}
+
+@app.get("/monte-carlo")
+def get_monte_carlo():
+    return {
+        "running":  monte_carlo_state.running,
+        "progress": round(monte_carlo_state.progress * 100),
+        "error":    monte_carlo_state.error,
+        "result":   monte_carlo_state.result,
     }
