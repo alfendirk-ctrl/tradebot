@@ -263,11 +263,17 @@ _DIST = os.path.join(os.path.dirname(__file__), "dashboard", "dist")
 
 @app.get("/", include_in_schema=False)
 async def spa_root():
-    return FileResponse(os.path.join(_DIST, "index.html"))
+    index = os.path.join(_DIST, "index.html")
+    if not os.path.isfile(index):
+        return {"status": "API online", "dashboard": "not built — run: npm --prefix dashboard run build"}
+    return FileResponse(index)
 
 @app.get("/{full_path:path}", include_in_schema=False)
 async def spa_fallback(full_path: str):
+    index = os.path.join(_DIST, "index.html")
+    if not os.path.isfile(index):
+        return {"status": "API online", "dashboard": "not built"}
     file = os.path.join(_DIST, full_path)
     if os.path.isfile(file):
         return FileResponse(file)
-    return FileResponse(os.path.join(_DIST, "index.html"))
+    return FileResponse(index)
