@@ -1,14 +1,14 @@
 [phases.setup]
-nixPkgs = ["nodejs_20"]
+nixPkgs = ["nodejs_20", "python313"]
 
 [phases.install]
 cmds = [
     "pip install -r requirements.txt",
-    "cd dashboard && npm install"
+    "npm --prefix dashboard install"
 ]
 
 [phases.build]
-cmds = ["cd dashboard && npm run build"]
+cmds = ["npm --prefix dashboard run build"]
 
 [start]
 cmd = "uvicorn api:app --host 0.0.0.0 --port $PORT"
