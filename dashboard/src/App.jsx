@@ -569,6 +569,132 @@ function ClosedTradesTable({ trades }) {
   );
 }
 
+// ─── Backtest Panel ───────────────────────────────────────────────────────────
+
+function BacktestPanel() {
+  const [btConfig, setBtConfig] = useState({ symbol: "BTC/USDT", days: 90, test_pct: 0.30, session_filter: true });
+  const [bt, setBt]     = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  const pollBacktest = useCallback(async () => {
+    const res = await fetch(`${API_URL}/backtest`);
+    const data = await res.json();
+    setBt(data);
+    if (data.running) setTimeout(pollBacktest, 2000);
+  }, []);
+
+  async function startBt() {
+    setLoading(true);
+    await fetch(`${API_URL}/backtest`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(btConfig),
+    });
+    setLoading(false);
+    pollBacktest();
+  }
+
+  const r = bt?.result;
+
+  return (
+    <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: 18, marginBottom: 16 }}>
+      <SectionLabel>Backtest</SectionLabel>
+
+      {/* Config row */}
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 12, alignItems: "flex-end" }}>
+        <label style={{ flex: 1, minWidth: 100 }}>
+          <div style={{ fontSize: 9, color: C.muted, marginBottom: 4, letterSpacing: 1 }}>DAGEN</div>
+          <input type="number" min="30" max="365" value={btConfig.days}
+            onChange={e => setBtConfig({ ...btConfig, days: +e.target.value })}
+            disabled={bt?.running} style={{ width: "100%" }} />
+        </label>
+        <label style={{ flex: 1, minWidth: 100 }}>
+          <div style={{ fontSize: 9, color: C.muted, marginBottom: 4, letterSpacing: 1 }}>TEST %</div>
+          <input type="number" min="10" max="50" step="5" value={btConfig.test_pct * 100}
+            onChange={e => setBtConfig({ ...btConfig, test_pct: +e.target.value / 100 })}
+            disabled={bt?.running} style={{ width: "100%" }} />
+        </label>
+        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10, color: C.muted, paddingBottom: 2 }}>
+          <input type="checkbox" checked={btConfig.session_filter}
+            onChange={e => setBtConfig({ ...btConfig, session_filter: e.target.checked })}
+            disabled={bt?.running} />
+          Sessie filter
+        </label>
+        <button className="btn-primary" onClick={startBt} disabled={bt?.running || loading}
+          style={{ flex: 1, minWidth: 120 }}>
+          {bt?.running ? `${bt.progress}%…` : "▶ Run Backtest"}
+        </button>
+      </div>
+
+      {bt?.error && (
+        <div style={{ color: C.red, fontSize: 11, marginBottom: 8 }}>⚠ {bt.error}</div>
+      )}
+
+      {r && (
+        <>
+          {/* Summary stats */}
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
+            {[
+              { label: "Trades",      value: r.total_trades },
+              { label: "Win Rate",    value: `${r.win_rate}%`, color: r.win_rate >= 50 ? C.green : C.red },
+              { label: "Profit Factor", value: r.profit_factor ?? "—", color: r.profit_factor > 1 ? C.green : C.red },
+              { label: "Sharpe",      value: r.sharpe ?? "—", color: r.sharpe > 1 ? C.green : C.yellow },
+              { label: "Max DD",      value: r.max_drawdown_pct != null ? `-${r.max_drawdown_pct}%` : "—", color: r.max_drawdown_pct > 15 ? C.red : C.muted },
+              { label: "Total PnL",   value: fmtSign(r.total_pnl), color: r.total_pnl >= 0 ? C.green : C.red },
+              { label: "Expectancy",  value: fmtSign(r.expectancy), color: r.expectancy >= 0 ? C.green : C.red },
+            ].map(s => (
+              <div key={s.label} style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: 6, padding: "8px 12px", flex: 1, minWidth: 80 }}>
+                <div style={{ fontSize: 9, color: C.muted, letterSpacing: 1, marginBottom: 4 }}>{s.label}</div>
+                <div style={{ fontSize: 13, fontWeight: 700, color: s.color || C.text }}>{s.value}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Periode */}
+          <div style={{ fontSize: 9, color: "#2a2a2a", marginBottom: 10 }}>
+            Train: {r.train_period} · Test: {r.test_period} · {r.duration_s}s
+          </div>
+
+          {/* Equity curve */}
+          {r.equity_curve?.length > 1 && (
+            <div style={{ marginBottom: 12 }}>
+              <div style={{ fontSize: 9, color: C.muted, letterSpacing: 1, marginBottom: 6 }}>EQUITY CURVE (BACKTEST)</div>
+              <ResponsiveContainer width="100%" height={120}>
+                <LineChart data={r.equity_curve} margin={{ top: 4, right: 6, left: -28, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#0f0f0f" vertical={false} />
+                  <XAxis dataKey="ts" stroke="transparent" tick={{ fill: "#2a2a2a", fontSize: 9 }} tickLine={false} interval="preserveStartEnd" />
+                  <YAxis stroke="transparent" tick={{ fill: "#2a2a2a", fontSize: 9 }} tickLine={false}
+                    tickFormatter={v => `$${(v/1000).toFixed(1)}k`} />
+                  <Tooltip content={<EquityTooltip />} />
+                  <ReferenceLine y={r.equity_curve[0]?.equity} stroke="#1a1a1a" strokeDasharray="4 4" />
+                  <Line type="monotone" dataKey="equity" stroke={r.total_pnl >= 0 ? C.green : C.red} dot={false} strokeWidth={1.5} />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+
+          {/* Per-setup breakdown */}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 6 }}>
+            {Object.entries(r.setup_stats || {}).map(([setup, d]) => (
+              <div key={setup} style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: 6, padding: "8px 10px" }}>
+                <div style={{ fontSize: 9, color: C.blue, letterSpacing: 1, textTransform: "uppercase", marginBottom: 6 }}>{setup}</div>
+                {d.trades === 0 ? (
+                  <div style={{ fontSize: 9, color: C.dimmer }}>geen trades</div>
+                ) : (
+                  <>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: d.win_rate >= 50 ? C.green : C.red }}>{d.win_rate}%</div>
+                    <div style={{ fontSize: 9, color: C.muted, marginTop: 2 }}>{d.trades} trades · PF {d.profit_factor ?? "—"}</div>
+                  </>
+                )}
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 // ─── Main Dashboard ───────────────────────────────────────────────────────────
 
 export default function Dashboard() {
@@ -782,6 +908,9 @@ export default function Dashboard() {
           <SetupStatsGrid stats={stats?.setup_stats} />
         </div>
       </div>
+
+      {/* Backtest */}
+      <BacktestPanel />
 
       {/* Closed trades */}
       <SectionLabel badge={closedTrades.length}>Gesloten trades</SectionLabel>

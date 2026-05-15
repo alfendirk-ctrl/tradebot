@@ -3,9 +3,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import threading
 import time
-from bot import state, run_bot, get_setup_health, SETUP_TYPES
+from bot import state, run_bot, get_setup_health, SETUP_TYPES, get_public_exchange, get_exchange
 from dataclasses import asdict
 from db import clear_trades as db_clear_trades
+from backtest import BacktestConfig, backtest_state, run_backtest
 import math
 
 app = FastAPI(title="BTC Trading Bot API")
@@ -147,3 +148,55 @@ def clear_trades():
     state.total_pnl = 0.0
     db_clear_trades()
     return {"message": "Trade history cleared"}
+
+
+# ── Backtest endpoints ────────────────────────────────────────────────────────
+
+class BacktestRequest(BaseModel):
+    symbol: str           = "BTC/USDT"
+    days: int             = 90
+    test_pct: float       = 0.30
+    risk_per_trade: float = 0.01
+    starting_balance: float = 10000.0
+    session_filter: bool  = True
+
+def _run_backtest_thread(config: BacktestConfig):
+    try:
+        backtest_state.running  = True
+        backtest_state.error    = ""
+        backtest_state.result   = None
+        backtest_state.progress = 0.0
+        exchange = get_public_exchange() if state.sim_mode else get_exchange()
+        result = run_backtest(config, exchange)
+        backtest_state.result = asdict(result)
+    except Exception as e:
+        backtest_state.error = str(e)
+        import logging; logging.getLogger(__name__).error(f"Backtest mislukt: {e}")
+    finally:
+        backtest_state.running  = False
+        backtest_state.progress = 1.0
+
+@app.post("/backtest")
+def start_backtest(req: BacktestRequest):
+    if backtest_state.running:
+        raise HTTPException(status_code=400, detail="Backtest is al bezig")
+    config = BacktestConfig(
+        symbol=req.symbol,
+        days=req.days,
+        test_pct=req.test_pct,
+        risk_per_trade=req.risk_per_trade,
+        starting_balance=req.starting_balance,
+        session_filter=req.session_filter,
+    )
+    t = threading.Thread(target=_run_backtest_thread, args=(config,), daemon=True)
+    t.start()
+    return {"message": f"Backtest gestart: {req.symbol} | {req.days}d | test={int(req.test_pct*100)}%"}
+
+@app.get("/backtest")
+def get_backtest():
+    return {
+        "running":  backtest_state.running,
+        "progress": round(backtest_state.progress * 100),
+        "error":    backtest_state.error,
+        "result":   backtest_state.result,
+    }
