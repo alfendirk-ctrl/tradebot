@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import {
-  LineChart, Line, BarChart, Bar,
+  AreaChart, Area,
+  BarChart, Bar,
   XAxis, YAxis, CartesianGrid,
   ResponsiveContainer, Cell, ReferenceLine, Tooltip,
 } from "recharts";
@@ -11,35 +12,46 @@ const SYMBOLS = ["BTC/USDC", "BTC/USDT", "ETH/USDC", "ETH/USDT", "SOL/USDC", "SO
 // ─── Theme ────────────────────────────────────────────────────────────────────
 
 const C = {
-  bg:     "#060606",
-  card:   "#0a0a0a",
-  card2:  "#0d0d0d",
-  border: "#161616",
-  green:  "#00ff88",
-  red:    "#ff4455",
-  yellow: "#ffd166",
-  orange: "#f4a261",
-  blue:   "#7788ff",
-  text:   "#e0e0e0",
-  muted:  "#444",
-  dim:    "#222",
-  dimmer: "#1a1a1a",
+  bg:        "#f0f2f7",
+  card:      "#ffffff",
+  border:    "#e2e5ef",
+  text:      "#1a1d2e",
+  muted:     "#8b92a5",
+  dim:       "#c5c9d6",
+  green:     "#00b37e",
+  greenBg:   "#e8f7f2",
+  greenLine: "#00c896",
+  red:       "#e63946",
+  redBg:     "#fdeaeb",
+  blue:      "#3b5bdb",
+  blueBg:    "#eef1fd",
+  yellow:    "#f59f00",
+  yellowBg:  "#fff8e6",
+  orange:    "#e8590c",
+  shadow:    "0 1px 4px rgba(30,40,80,0.07), 0 1px 2px rgba(30,40,80,0.04)",
+  shadowMd:  "0 4px 12px rgba(30,40,80,0.09)",
 };
 
 const PHASES = {
-  open:      { label: "OPEN",    color: C.green,   bg: "#001a0d", pct: 100 },
-  partial_1: { label: "TP1 ✓",  color: C.yellow,  bg: "#1a1200", pct: 75  },
-  partial_2: { label: "TP2 ✓",  color: C.orange,  bg: "#1a0d00", pct: 50  },
-  partial_3: { label: "RUNNER", color: "#e76f51",  bg: "#1a0800", pct: 25  },
-  closed:    { label: "CLOSED", color: C.muted,    bg: "#111",    pct: 0   },
+  open:      { label: "OPEN",    color: C.green,  bg: C.greenBg, pct: 100 },
+  partial_1: { label: "TP1 ✓",  color: C.yellow, bg: C.yellowBg, pct: 75 },
+  partial_2: { label: "TP2 ✓",  color: C.orange, bg: "#fff3ec",  pct: 50 },
+  partial_3: { label: "RUNNER", color: C.red,     bg: C.redBg,   pct: 25 },
+  closed:    { label: "CLOSED", color: C.muted,   bg: "#f5f6fa",  pct: 0  },
+};
+
+const HEALTH = {
+  healthy:   { color: C.green,  bg: C.greenBg,  label: "Actief"    },
+  degrading: { color: C.yellow, bg: C.yellowBg, label: "Degrading" },
+  disabled:  { color: C.red,    bg: C.redBg,    label: "Disabled"  },
 };
 
 const SETUP_META = [
   { key: "liquidity_sweep", label: "Liq. Sweep",   desc: "Fake-out op key level" },
-  { key: "rotation",        label: "Rotation",     desc: "Structuurbreuk" },
-  { key: "breakout",        label: "Breakout",     desc: "Break + retest" },
-  { key: "continuation",    label: "Continuation", desc: "Pullback constructie" },
-  { key: "range",           label: "Range",        desc: "Long/short extreme" },
+  { key: "rotation",        label: "Rotation",     desc: "Structuurbreuk"        },
+  { key: "breakout",        label: "Breakout",     desc: "Break + retest"        },
+  { key: "continuation",    label: "Continuation", desc: "Pullback constructie"  },
+  { key: "range",           label: "Range",        desc: "Long/short extreme"    },
 ];
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
@@ -49,63 +61,78 @@ const fmtP    = (n) => n == null ? "—" : Number(n).toLocaleString("nl-NL", { m
 const fmtSign = (n, d = 2) => n == null ? "—" : `${n >= 0 ? "+" : ""}$${fmt(n, d)}`;
 const getPhase = (t) => PHASES[t.status] || PHASES.open;
 
-// ─── Base atoms ───────────────────────────────────────────────────────────────
+function getSession() {
+  const h = new Date().getUTCHours();
+  if (h >= 8  && h < 12) return { name: "London",   color: C.blue,   active: true  };
+  if (h >= 13 && h < 17) return { name: "New York",  color: C.green,  active: true  };
+  return                         { name: "Off-hours", color: C.muted,  active: false };
+}
+
+// ─── Atoms ────────────────────────────────────────────────────────────────────
 
 function PnlBadge({ value, size = 13 }) {
   if (value == null) return <span style={{ color: C.muted }}>—</span>;
+  const pos = value >= 0;
   return (
-    <span style={{ color: value >= 0 ? C.green : C.red, fontWeight: 700, fontSize: size }}>
-      {value >= 0 ? "+" : ""}{fmt(value)} USDT
+    <span style={{ color: pos ? C.green : C.red, fontWeight: 700, fontSize: size }}>
+      {pos ? "+" : ""}{fmt(value)} USDT
     </span>
   );
 }
 
-function Metric({ label, value, color }) {
+function Tag({ children, color, bg }) {
   return (
-    <div>
-      <div style={{ fontSize: 9, color: C.dimmer, letterSpacing: 1, marginBottom: 3, textTransform: "uppercase" }}>{label}</div>
-      <div style={{ fontSize: 12, fontWeight: 700, color: color || C.text }}>{value ?? "—"}</div>
-    </div>
-  );
-}
-
-function StatCard({ label, value, sub, accent }) {
-  return (
-    <div style={{
-      background: C.card2,
-      border: `1px solid ${accent ? accent + "22" : C.border}`,
-      borderRadius: 8, padding: "14px 18px", minWidth: 120, flex: 1,
+    <span style={{
+      fontSize: 9, padding: "2px 8px", borderRadius: 99, fontWeight: 700,
+      letterSpacing: 0.5, textTransform: "uppercase",
+      color: color || C.muted, background: bg || C.border,
     }}>
-      <div style={{ color: C.muted, fontSize: 9, letterSpacing: 2, textTransform: "uppercase", marginBottom: 6 }}>{label}</div>
-      <div style={{ color: accent || C.text, fontSize: 18, fontWeight: 700 }}>{value}</div>
-      {sub && <div style={{ color: C.dimmer, fontSize: 10, marginTop: 3 }}>{sub}</div>}
-    </div>
+      {children}
+    </span>
   );
 }
 
 function SectionLabel({ children, badge }) {
   return (
     <div style={{
-      fontSize: 9, letterSpacing: 2, color: C.muted, marginBottom: 12,
-      textTransform: "uppercase", display: "flex", alignItems: "center", gap: 8,
+      fontSize: 10, letterSpacing: 1.5, color: C.muted, marginBottom: 14,
+      textTransform: "uppercase", fontWeight: 600,
+      display: "flex", alignItems: "center", gap: 8,
     }}>
       {children}
-      {badge != null && badge > 0 && (
-        <span style={{ color: C.yellow }}>{badge > 0 ? `(${badge})` : ""}</span>
+      {badge > 0 && (
+        <span style={{
+          background: C.blue, color: "#fff", fontSize: 9, fontWeight: 700,
+          borderRadius: 99, padding: "1px 7px",
+        }}>{badge}</span>
       )}
     </div>
   );
 }
 
-function EmptyState({ icon, text, sub, height = 130 }) {
+function EmptyState({ icon, text, sub, height = 120 }) {
   return (
     <div style={{
       display: "flex", flexDirection: "column", alignItems: "center",
       justifyContent: "center", height, gap: 6, color: C.dim,
     }}>
-      <div style={{ fontSize: 22, opacity: 0.2 }}>{icon}</div>
-      <div style={{ fontSize: 11 }}>{text}</div>
-      {sub && <div style={{ fontSize: 10, color: C.dimmer }}>{sub}</div>}
+      <div style={{ fontSize: 24, opacity: 0.35 }}>{icon}</div>
+      <div style={{ fontSize: 12, color: C.muted }}>{text}</div>
+      {sub && <div style={{ fontSize: 10, color: C.dim }}>{sub}</div>}
+    </div>
+  );
+}
+
+function StatCard({ label, value, sub, accent, small }) {
+  return (
+    <div style={{
+      background: C.card, borderRadius: 12, padding: small ? "12px 16px" : "16px 20px",
+      boxShadow: C.shadow, flex: 1, minWidth: 100,
+      borderLeft: accent ? `3px solid ${accent}` : "3px solid transparent",
+    }}>
+      <div style={{ fontSize: 9, color: C.muted, letterSpacing: 1.5, textTransform: "uppercase", marginBottom: 6 }}>{label}</div>
+      <div style={{ fontSize: small ? 16 : 20, fontWeight: 700, color: accent || C.text, lineHeight: 1 }}>{value}</div>
+      {sub && <div style={{ fontSize: 10, color: C.dim, marginTop: 4 }}>{sub}</div>}
     </div>
   );
 }
@@ -119,21 +146,67 @@ function CircuitBreakerBanner({ status }) {
     : "—";
   return (
     <div style={{
-      background: "#180808", border: `1px solid ${C.red}44`,
-      borderRadius: 8, padding: "12px 18px", marginBottom: 16,
-      display: "flex", alignItems: "center", gap: 12,
+      background: C.redBg, border: `1px solid ${C.red}33`,
+      borderRadius: 12, padding: "14px 20px", marginBottom: 20,
+      display: "flex", alignItems: "center", gap: 14,
     }}>
-      <span style={{ fontSize: 18 }}>🚨</span>
+      <span style={{ fontSize: 20 }}>🚨</span>
       <div style={{ flex: 1 }}>
-        <div style={{ fontSize: 11, color: C.red, fontWeight: 700, letterSpacing: 0.5 }}>
-          CIRCUIT BREAKER ACTIEF — 5 stops op rij
+        <div style={{ fontSize: 12, color: C.red, fontWeight: 700 }}>
+          Circuit Breaker actief — {status.consecutive_stops} stops op rij
         </div>
-        <div style={{ fontSize: 10, color: C.red + "66", marginTop: 2 }}>
+        <div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>
           Bot gepauzeerd tot {until}
         </div>
       </div>
-      <div style={{ fontSize: 11, color: C.red + "88", fontWeight: 700 }}>
-        {status.consecutive_stops} STOPS
+    </div>
+  );
+}
+
+// ─── Session Indicator ────────────────────────────────────────────────────────
+
+function SessionIndicator() {
+  const [sess, setSess] = useState(getSession());
+  useEffect(() => {
+    const id = setInterval(() => setSess(getSession()), 30000);
+    return () => clearInterval(id);
+  }, []);
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", gap: 6,
+      background: sess.active ? C.greenBg : "#f5f6fa",
+      border: `1px solid ${sess.active ? C.green + "44" : C.border}`,
+      borderRadius: 99, padding: "4px 12px",
+    }}>
+      <div style={{
+        width: 7, height: 7, borderRadius: "50%",
+        background: sess.active ? C.green : C.dim,
+        boxShadow: sess.active ? `0 0 0 3px ${C.green}33` : "none",
+      }} />
+      <span style={{ fontSize: 10, color: sess.active ? C.green : C.muted, fontWeight: 600, letterSpacing: 0.5 }}>
+        {sess.name}
+      </span>
+    </div>
+  );
+}
+
+// ─── Win Rate Bar ─────────────────────────────────────────────────────────────
+
+function WinRateBar({ value, small }) {
+  if (value == null) return <div style={{ fontSize: 10, color: C.dim, fontStyle: "italic" }}>geen data</div>;
+  const color = value >= 50 ? C.green : value >= 40 ? C.yellow : C.red;
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+        <span style={{ fontSize: small ? 9 : 10, color: C.muted }}>Win rate</span>
+        <span style={{ fontSize: small ? 10 : 12, fontWeight: 700, color }}>{value}%</span>
+      </div>
+      <div style={{ height: 5, background: C.border, borderRadius: 99, overflow: "hidden" }}>
+        <div style={{
+          height: "100%", width: `${value}%`,
+          background: color, borderRadius: 99,
+          transition: "width 0.4s ease",
+        }} />
       </div>
     </div>
   );
@@ -150,15 +223,15 @@ function PriceLadder({ trade }) {
   const pct  = (p) => (p - minP) / span * 100;
 
   const zones = isLong ? [
-    { from: trade.stop_loss,   to: trade.entry_price, color: "#ff445520" },
-    { from: trade.entry_price, to: trade.tp1,          color: "#00ff8818" },
-    { from: trade.tp1,         to: trade.tp2,          color: "#00ff8828" },
-    { from: trade.tp2,         to: trade.tp3,          color: "#00ff8840" },
+    { from: trade.stop_loss,   to: trade.entry_price, color: C.red + "20"   },
+    { from: trade.entry_price, to: trade.tp1,          color: C.green + "20" },
+    { from: trade.tp1,         to: trade.tp2,          color: C.green + "35" },
+    { from: trade.tp2,         to: trade.tp3,          color: C.green + "50" },
   ] : [
-    { from: trade.entry_price, to: trade.stop_loss,   color: "#ff445520" },
-    { from: trade.tp1,         to: trade.entry_price, color: "#00ff8818" },
-    { from: trade.tp2,         to: trade.tp1,         color: "#00ff8828" },
-    { from: trade.tp3,         to: trade.tp2,         color: "#00ff8840" },
+    { from: trade.entry_price, to: trade.stop_loss,   color: C.red + "20"   },
+    { from: trade.tp1,         to: trade.entry_price, color: C.green + "20" },
+    { from: trade.tp2,         to: trade.tp1,         color: C.green + "35" },
+    { from: trade.tp3,         to: trade.tp2,         color: C.green + "50" },
   ];
 
   const markers = [
@@ -170,40 +243,29 @@ function PriceLadder({ trade }) {
   ];
 
   return (
-    <div style={{ position: "relative", height: 54, marginTop: 10, userSelect: "none" }}>
-      {/* Track */}
-      <div style={{ position: "absolute", top: 22, left: 0, right: 0, height: 3, background: "#0f0f0f", borderRadius: 2 }} />
-
-      {/* Zones */}
+    <div style={{ position: "relative", height: 56, marginTop: 12, userSelect: "none" }}>
+      <div style={{ position: "absolute", top: 22, left: 0, right: 0, height: 3, background: C.border, borderRadius: 2 }} />
       {zones.map((z, i) => {
         const l = Math.min(pct(z.from), pct(z.to));
         const w = Math.abs(pct(z.to) - pct(z.from));
-        return (
-          <div key={i} style={{
-            position: "absolute", top: 22, height: 3,
-            left: `${l}%`, width: `${w}%`,
-            background: z.color,
-          }} />
-        );
+        return <div key={i} style={{ position: "absolute", top: 22, height: 3, left: `${l}%`, width: `${w}%`, background: z.color }} />;
       })}
-
-      {/* Markers */}
       {markers.map((m) => (
         <div key={m.label} style={{
           position: "absolute", left: `${pct(m.price)}%`,
           transform: "translateX(-50%)",
           display: "flex", flexDirection: "column", alignItems: "center", top: 0,
         }}>
-          <div style={{ fontSize: 8, color: m.hit ? m.color : "#2a2a2a", whiteSpace: "nowrap", marginBottom: 1, letterSpacing: 0.3 }}>
+          <div style={{ fontSize: 8, color: m.hit ? m.color : C.dim, whiteSpace: "nowrap", marginBottom: 1, fontWeight: 600 }}>
             {m.label}
           </div>
-          <div style={{ width: 1, height: 9, background: m.hit ? m.color : "#222" }} />
+          <div style={{ width: 1, height: 9, background: m.hit ? m.color : C.border }} />
           <div style={{
-            width: 5, height: 5, borderRadius: "50%",
-            background: m.hit ? m.color + "33" : "#111",
-            border: `1px solid ${m.hit ? m.color : "#333"}`,
+            width: 7, height: 7, borderRadius: "50%",
+            background: m.hit ? m.color + "22" : "#f5f6fa",
+            border: `2px solid ${m.hit ? m.color : C.border}`,
           }} />
-          <div style={{ fontSize: 8, color: "#2a2a2a", whiteSpace: "nowrap", marginTop: 2 }}>
+          <div style={{ fontSize: 8, color: C.muted, whiteSpace: "nowrap", marginTop: 3 }}>
             {fmtP(m.price)}
           </div>
         </div>
@@ -216,29 +278,27 @@ function PriceLadder({ trade }) {
 
 function TpProgress({ trade }) {
   return (
-    <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+    <div style={{ display: "flex", gap: 4 }}>
       {[
         { key: "tp1_hit", label: "TP1" },
         { key: "tp2_hit", label: "TP2" },
         { key: "tp3_hit", label: "TP3" },
       ].map(tp => (
-        <div key={tp.key} style={{
-          fontSize: 9, padding: "2px 6px", borderRadius: 3, letterSpacing: 0.5,
-          background: trade[tp.key] ? "#1a3a1a" : "#111",
-          color:      trade[tp.key] ? C.green   : "#333",
-          border: `1px solid ${trade[tp.key] ? "#00ff4422" : C.dimmer}`,
+        <span key={tp.key} style={{
+          fontSize: 9, padding: "2px 8px", borderRadius: 99, fontWeight: 700,
+          background: trade[tp.key] ? C.greenBg : C.border,
+          color: trade[tp.key] ? C.green : C.muted,
         }}>
-          {trade[tp.key] ? "✓" : "·"} {tp.label}
-        </div>
+          {trade[tp.key] ? "✓ " : ""}{tp.label}
+        </span>
       ))}
-      <div style={{
-        fontSize: 9, padding: "2px 6px", borderRadius: 3, letterSpacing: 0.5,
-        background: trade.status === "partial_3" ? "#2a0d00" : "#111",
-        color:      trade.status === "partial_3" ? "#e76f51" : "#333",
-        border: `1px solid ${trade.status === "partial_3" ? "#e76f5122" : C.dimmer}`,
+      <span style={{
+        fontSize: 9, padding: "2px 8px", borderRadius: 99, fontWeight: 700,
+        background: trade.status === "partial_3" ? C.redBg : C.border,
+        color: trade.status === "partial_3" ? C.red : C.muted,
       }}>
-        {trade.status === "partial_3" ? "⟳" : "·"} RUN
-      </div>
+        {trade.status === "partial_3" ? "⟳ " : ""}RUN
+      </span>
     </div>
   );
 }
@@ -252,86 +312,74 @@ function ActiveTradeCard({ trade }) {
 
   return (
     <div style={{
-      background: C.card,
-      border: `1px solid ${phase.color}22`,
-      borderLeft: `3px solid ${phase.color}`,
-      borderRadius: 8, padding: "14px 18px", marginBottom: 10,
+      background: C.card, borderRadius: 14, padding: "18px 20px", marginBottom: 12,
+      boxShadow: C.shadowMd,
+      borderLeft: `4px solid ${isLong ? C.green : C.red}`,
     }}>
-      {/* Header */}
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 14 }}>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <span style={{ fontSize: 11, fontWeight: 700, color: isLong ? C.green : C.red }}>
+          <span style={{ fontSize: 13, fontWeight: 800, color: isLong ? C.green : C.red }}>
             {isLong ? "▲ LONG" : "▼ SHORT"}
           </span>
-          <span style={{ fontSize: 10, color: C.muted }}>{trade.symbol}</span>
-          <span style={{
-            fontSize: 9, padding: "2px 7px", borderRadius: 3,
-            background: "#1a1a2a", color: C.blue, letterSpacing: 1, textTransform: "uppercase",
-          }}>{trade.setup_type}</span>
+          <span style={{ fontSize: 11, color: C.muted }}>{trade.symbol}</span>
+          <Tag color={C.blue} bg={C.blueBg}>{trade.setup_type.replace("_", " ")}</Tag>
         </div>
-        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-          <span style={{
-            fontSize: 9, padding: "2px 8px", borderRadius: 4, letterSpacing: 1, fontWeight: 700,
-            background: phase.bg, color: phase.color,
-          }}>{phase.label}</span>
-          <span style={{ fontSize: 10, color: "#333" }}>{phase.pct}% open</span>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <Tag color={phase.color} bg={phase.bg}>{phase.label}</Tag>
+          <span style={{ fontSize: 10, color: C.muted }}>{phase.pct}% open</span>
         </div>
       </div>
 
       {/* Price grid */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(6,1fr)", gap: 6, marginBottom: 6 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(6,1fr)", gap: 8, marginBottom: 4 }}>
         {[
           { label: "ENTRY",  value: fmtP(trade.entry_price), color: C.text },
-          { label: slLabel,  value: fmtP(trade.stop_loss),   color: C.red },
+          { label: slLabel,  value: fmtP(trade.stop_loss),   color: C.red  },
           { label: "TP1",    value: fmtP(trade.tp1), color: trade.tp1_hit ? C.green : C.muted },
           { label: "TP2",    value: fmtP(trade.tp2), color: trade.tp2_hit ? C.green : C.muted },
           { label: "TP3",    value: fmtP(trade.tp3), color: trade.tp3_hit ? C.green : C.muted },
-          { label: "RUNNER", value: trade.tp3_hit ? "OPEN" : "—", color: trade.tp3_hit ? "#e76f51" : "#333" },
+          { label: "RUNNER", value: trade.tp3_hit ? "OPEN" : "—", color: trade.tp3_hit ? C.red : C.dim },
         ].map(item => (
           <div key={item.label} style={{ textAlign: "center" }}>
-            <div style={{ fontSize: 9, color: C.muted, letterSpacing: 1, marginBottom: 3 }}>{item.label}</div>
-            <div style={{ fontSize: 11, color: item.color, fontWeight: 600 }}>{item.value}</div>
+            <div style={{ fontSize: 8, color: C.muted, letterSpacing: 1, marginBottom: 3, textTransform: "uppercase" }}>{item.label}</div>
+            <div style={{ fontSize: 12, color: item.color, fontWeight: 700 }}>{item.value}</div>
           </div>
         ))}
       </div>
 
-      {/* Price Ladder */}
       <PriceLadder trade={trade} />
 
-      {/* Footer */}
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 8 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 10 }}>
         <TpProgress trade={trade} />
         <div style={{ textAlign: "right" }}>
           <div style={{ fontSize: 9, color: C.muted, letterSpacing: 1, marginBottom: 2 }}>REALIZED PNL</div>
-          <PnlBadge value={trade.realized_pnl} size={12} />
+          <PnlBadge value={trade.realized_pnl} size={14} />
         </div>
       </div>
 
-      <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6 }}>
-        {trade.session && trade.session !== 'unknown' && (
-          <span style={{ fontSize: 9, color: C.blue, letterSpacing: 1, textTransform: "uppercase" }}>
-            ⏱ {trade.session.replace('_', ' ')}
-          </span>
-        )}
-        {trade.valid_until && (
-          <span style={{ fontSize: 9, color: C.muted }}>
-            geldig tot {trade.valid_until?.slice(11, 16)} UTC
-          </span>
-        )}
-      </div>
+      {(trade.session || trade.valid_until) && (
+        <div style={{ display: "flex", justifyContent: "space-between", marginTop: 10, paddingTop: 10, borderTop: `1px solid ${C.border}` }}>
+          {trade.session && trade.session !== 'unknown' && (
+            <Tag color={C.blue} bg={C.blueBg}>⏱ {trade.session.replace("_", " ")}</Tag>
+          )}
+          {trade.valid_until && (
+            <span style={{ fontSize: 9, color: C.muted }}>geldig tot {trade.valid_until?.slice(11, 16)} UTC</span>
+          )}
+        </div>
+      )}
       {trade.reason && (
-        <div style={{ marginTop: 4, fontSize: 10, color: "#2a2a2a", fontStyle: "italic" }}>{trade.reason}</div>
+        <div style={{ marginTop: 8, fontSize: 10, color: C.dim, fontStyle: "italic" }}>{trade.reason}</div>
       )}
     </div>
   );
 }
 
-// ─── Chart tooltips ───────────────────────────────────────────────────────────
+// ─── Chart Tooltips ───────────────────────────────────────────────────────────
 
 function EquityTooltip({ active, payload, label }) {
   if (!active || !payload?.length) return null;
   return (
-    <div style={{ background: "#0d0d0d", border: "1px solid #222", borderRadius: 6, padding: "6px 10px", fontSize: 11 }}>
+    <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 8, padding: "8px 12px", boxShadow: C.shadow, fontSize: 11 }}>
       <div style={{ color: C.muted, fontSize: 9, marginBottom: 3 }}>{label}</div>
       <div style={{ color: C.green, fontWeight: 700 }}>${fmt(payload[0].value, 0)}</div>
     </div>
@@ -342,7 +390,7 @@ function PnlTooltip({ active, payload, label }) {
   if (!active || !payload?.length) return null;
   const v = payload[0].value;
   return (
-    <div style={{ background: "#0d0d0d", border: "1px solid #222", borderRadius: 6, padding: "6px 10px", fontSize: 11 }}>
+    <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 8, padding: "8px 12px", boxShadow: C.shadow, fontSize: 11 }}>
       <div style={{ color: C.muted, fontSize: 9, marginBottom: 3 }}>{label}</div>
       <div style={{ color: v >= 0 ? C.green : C.red, fontWeight: 700 }}>{fmtSign(v)}</div>
     </div>
@@ -353,19 +401,28 @@ function PnlTooltip({ active, payload, label }) {
 
 function EquityCurve({ history }) {
   if (!history?.length) {
-    return <EmptyState icon="📈" text="Nog geen equity data" sub="Verschijnt na de eerste gesloten trade" height={155} />;
+    return <EmptyState icon="📈" text="Nog geen equity data" sub="Verschijnt na de eerste gesloten trade" />;
   }
+  const isPos = history[history.length - 1]?.equity >= history[0]?.equity;
+  const color = isPos ? C.greenLine : C.red;
   return (
-    <ResponsiveContainer width="100%" height={155}>
-      <LineChart data={history} margin={{ top: 4, right: 6, left: -28, bottom: 0 }}>
-        <CartesianGrid strokeDasharray="3 3" stroke="#0f0f0f" vertical={false} />
-        <XAxis dataKey="ts" stroke="transparent" tick={{ fill: "#2a2a2a", fontSize: 9 }} tickLine={false} interval="preserveStartEnd" />
-        <YAxis stroke="transparent" tick={{ fill: "#2a2a2a", fontSize: 9 }} tickLine={false} axisLine={false}
+    <ResponsiveContainer width="100%" height={160}>
+      <AreaChart data={history} margin={{ top: 4, right: 6, left: -28, bottom: 0 }}>
+        <defs>
+          <linearGradient id="equityGrad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="5%"  stopColor={color} stopOpacity={0.18} />
+            <stop offset="95%" stopColor={color} stopOpacity={0}    />
+          </linearGradient>
+        </defs>
+        <CartesianGrid strokeDasharray="3 3" stroke={C.border} vertical={false} />
+        <XAxis dataKey="ts" stroke="transparent" tick={{ fill: C.dim, fontSize: 9 }} tickLine={false} interval="preserveStartEnd" />
+        <YAxis stroke="transparent" tick={{ fill: C.dim, fontSize: 9 }} tickLine={false} axisLine={false}
           tickFormatter={v => `$${(v / 1000).toFixed(1)}k`} />
         <Tooltip content={<EquityTooltip />} />
-        <ReferenceLine y={history[0]?.equity} stroke="#1a1a1a" strokeDasharray="4 4" />
-        <Line type="monotone" dataKey="equity" stroke={C.green} dot={false} strokeWidth={1.5} animationDuration={400} />
-      </LineChart>
+        <ReferenceLine y={history[0]?.equity} stroke={C.border} strokeDasharray="4 4" />
+        <Area type="monotone" dataKey="equity" stroke={color} strokeWidth={2}
+          fill="url(#equityGrad)" dot={false} animationDuration={400} />
+      </AreaChart>
     </ResponsiveContainer>
   );
 }
@@ -379,15 +436,15 @@ function DailyPnlChart({ data }) {
   return (
     <ResponsiveContainer width="100%" height={130}>
       <BarChart data={data} margin={{ top: 4, right: 6, left: -28, bottom: 0 }}>
-        <CartesianGrid strokeDasharray="3 3" stroke="#0f0f0f" vertical={false} />
-        <XAxis dataKey="date" stroke="transparent" tick={{ fill: "#2a2a2a", fontSize: 9 }} tickLine={false} />
-        <YAxis stroke="transparent" tick={{ fill: "#2a2a2a", fontSize: 9 }} tickLine={false} axisLine={false}
+        <CartesianGrid strokeDasharray="3 3" stroke={C.border} vertical={false} />
+        <XAxis dataKey="date" stroke="transparent" tick={{ fill: C.dim, fontSize: 9 }} tickLine={false} />
+        <YAxis stroke="transparent" tick={{ fill: C.dim, fontSize: 9 }} tickLine={false} axisLine={false}
           tickFormatter={v => `$${v}`} />
         <Tooltip content={<PnlTooltip />} />
-        <ReferenceLine y={0} stroke="#1a1a1a" />
-        <Bar dataKey="pnl" radius={[2, 2, 0, 0]} maxBarSize={44} animationDuration={400}>
+        <ReferenceLine y={0} stroke={C.border} />
+        <Bar dataKey="pnl" radius={[3, 3, 0, 0]} maxBarSize={44} animationDuration={400}>
           {data.map((entry, i) => (
-            <Cell key={i} fill={entry.pnl >= 0 ? C.green : C.red} fillOpacity={0.75} />
+            <Cell key={i} fill={entry.pnl >= 0 ? C.green : C.red} fillOpacity={0.8} />
           ))}
         </Bar>
       </BarChart>
@@ -395,64 +452,38 @@ function DailyPnlChart({ data }) {
   );
 }
 
-// ─── Setup Stats ──────────────────────────────────────────────────────────────
+// ─── Setup Health Panel (sidebar) ────────────────────────────────────────────
 
-const HEALTH_COLOR = { healthy: C.green, degrading: C.yellow, disabled: C.red };
-const HEALTH_LABEL = { healthy: "ACTIEF", degrading: "DEGRADING", disabled: "DISABLED" };
-
-function SetupStatsGrid({ stats }) {
+function SetupHealthPanel({ setupHealth }) {
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-      {SETUP_META.map(s => {
-        const d = stats?.[s.key];
-        const health = d?.health || 'healthy';
-        const healthColor = HEALTH_COLOR[health];
-        const isDisabled = health === 'disabled';
-        return (
-          <div key={s.key} style={{
-            background: C.bg,
-            border: `1px solid ${isDisabled ? C.red + '44' : C.border}`,
-            borderRadius: 8, padding: "12px 14px",
-            opacity: isDisabled ? 0.6 : 1,
-          }}>
-            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
-              <div>
-                <div style={{ fontSize: 10, color: isDisabled ? C.red : C.blue, letterSpacing: 1, textTransform: "uppercase" }}>{s.label}</div>
-                <div style={{ fontSize: 9, color: "#2a2a2a", marginTop: 1 }}>{s.desc}</div>
-              </div>
-              <div style={{ textAlign: "right" }}>
-                {d?.count > 0 && (
-                  <div style={{ fontSize: 11, fontWeight: 700, color: d.win_rate >= 50 ? C.green : C.red }}>
-                    {d.win_rate}%
-                  </div>
-                )}
-                <div style={{ fontSize: 8, color: healthColor, letterSpacing: 1, marginTop: 2 }}>
-                  {HEALTH_LABEL[health]}
+    <div style={{ background: C.card, borderRadius: 14, padding: 18, boxShadow: C.shadow }}>
+      <SectionLabel>Setups</SectionLabel>
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        {SETUP_META.map(s => {
+          const h = setupHealth?.[s.key];
+          const health = HEALTH[h?.status || 'healthy'];
+          const isDisabled = h?.status === 'disabled';
+          return (
+            <div key={s.key} style={{ opacity: isDisabled ? 0.55 : 1 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                <div>
+                  <span style={{ fontSize: 11, fontWeight: 700, color: isDisabled ? C.red : C.text }}>
+                    {s.label}
+                  </span>
+                  <span style={{ fontSize: 9, color: C.muted, marginLeft: 6 }}>{s.desc}</span>
                 </div>
+                <Tag color={health.color} bg={health.bg}>{health.label}</Tag>
               </div>
+              <WinRateBar value={h?.recent_win_rate ?? null} small />
+              {h?.recent_trades > 0 && (
+                <div style={{ fontSize: 9, color: C.dim, marginTop: 3 }}>
+                  {h.recent_trades} recente trades
+                </div>
+              )}
             </div>
-            {d?.recent_win_rate != null && (
-              <div style={{ fontSize: 9, color: C.muted, marginBottom: 6 }}>
-                Laatste {d.recent_trades} trades:{" "}
-                <span style={{ color: d.recent_win_rate >= 50 ? C.green : C.red, fontWeight: 700 }}>
-                  {d.recent_win_rate}%
-                </span>
-              </div>
-            )}
-            {!d || d.count === 0 ? (
-              <div style={{ fontSize: 10, color: C.dimmer, fontStyle: "italic" }}>geen trades</div>
-            ) : (
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                <Metric label="Trades"       value={d.count} />
-                <Metric label="Gem. PnL"     value={fmtSign(d.avg_pnl)} color={d.avg_pnl >= 0 ? C.green : C.red} />
-                <Metric label="Winst"        value={`${d.wins}/${d.count}`} />
-                <Metric label="Prof. factor" value={d.profit_factor ?? "—"}
-                  color={d.profit_factor > 1 ? C.green : d.profit_factor != null ? C.red : C.muted} />
-              </div>
-            )}
-          </div>
-        );
-      })}
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -461,60 +492,30 @@ function SetupStatsGrid({ stats }) {
 
 function ConfigPanel({ config, setConfig, isRunning, loading, onStart, onStop }) {
   return (
-    <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: 18, marginBottom: 12 }}>
+    <div style={{ background: C.card, borderRadius: 14, padding: 18, boxShadow: C.shadow, marginBottom: 16 }}>
       <SectionLabel>Configuratie</SectionLabel>
-      <label style={{ display: "block", marginBottom: 12 }}>
-        <div style={{ fontSize: 9, color: C.muted, marginBottom: 4, letterSpacing: 1 }}>SYMBOL</div>
+      <label style={{ display: "block", marginBottom: 14 }}>
+        <div style={{ fontSize: 9, color: C.muted, marginBottom: 5, letterSpacing: 1, textTransform: "uppercase" }}>Symbol</div>
         <select value={config.symbol} onChange={e => setConfig({ ...config, symbol: e.target.value })} disabled={isRunning}>
           {SYMBOLS.map(s => <option key={s}>{s}</option>)}
         </select>
       </label>
-      <label style={{ display: "block", marginBottom: 18 }}>
-        <div style={{ fontSize: 9, color: C.muted, marginBottom: 4, letterSpacing: 1 }}>RISICO PER TRADE</div>
+      <label style={{ display: "block", marginBottom: 20 }}>
+        <div style={{ fontSize: 9, color: C.muted, marginBottom: 5, letterSpacing: 1, textTransform: "uppercase" }}>Risico per trade</div>
         <input
           type="number" min="0.001" max="0.05" step="0.001"
           value={config.risk_per_trade}
           onChange={e => setConfig({ ...config, risk_per_trade: parseFloat(e.target.value) })}
           disabled={isRunning}
         />
-        <div style={{ fontSize: 10, color: "#2a2a2a", marginTop: 3 }}>
+        <div style={{ fontSize: 10, color: C.muted, marginTop: 4 }}>
           {(config.risk_per_trade * 100).toFixed(1)}% per trade
         </div>
       </label>
       {!isRunning
-        ? <button className="btn-primary" onClick={onStart} disabled={loading}>{loading ? "Starten..." : "▶ Start Bot"}</button>
-        : <button className="btn-danger"  onClick={onStop}  disabled={loading}>{loading ? "Stoppen..." : "■ Stop Bot"}</button>
+        ? <button className="btn-primary" onClick={onStart} disabled={loading}>{loading ? "Starten…" : "▶  Start Bot"}</button>
+        : <button className="btn-danger"  onClick={onStop}  disabled={loading}>{loading ? "Stoppen…" : "■  Stop Bot"}</button>
       }
-    </div>
-  );
-}
-
-// ─── Strategy Legend ──────────────────────────────────────────────────────────
-
-function StrategyLegend() {
-  return (
-    <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: 18 }}>
-      <SectionLabel>Setups</SectionLabel>
-      {SETUP_META.map(s => (
-        <div key={s.key} style={{ marginBottom: 10 }}>
-          <div style={{ fontSize: 10, color: C.blue }}>{s.label}</div>
-          <div style={{ fontSize: 10, color: "#2a2a2a", marginTop: 1 }}>{s.desc}</div>
-        </div>
-      ))}
-      <div style={{ marginTop: 14, paddingTop: 12, borderTop: `1px solid ${C.border}` }}>
-        <div style={{ fontSize: 9, color: C.muted, letterSpacing: 1, marginBottom: 8 }}>TP STRUCTUUR</div>
-        {[
-          { label: "TP1 (25%)",    note: "SL → Breakeven" },
-          { label: "TP2 (25%)",    note: "SL → Swing PA" },
-          { label: "TP3 (25%)",    note: "SL → Nieuw swing" },
-          { label: "Runner (25%)", note: "SL trailend" },
-        ].map(r => (
-          <div key={r.label} style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}>
-            <span style={{ fontSize: 10, color: C.muted }}>{r.label}</span>
-            <span style={{ fontSize: 10, color: C.dim }}>{r.note}</span>
-          </div>
-        ))}
-      </div>
     </div>
   );
 }
@@ -524,48 +525,109 @@ function StrategyLegend() {
 function ClosedTradesTable({ trades }) {
   if (!trades.length) {
     return (
-      <div style={{
-        background: C.card, border: `1px solid ${C.border}`, borderRadius: 8,
-        padding: "28px 0", textAlign: "center", color: C.dim, fontSize: 11,
-      }}>
-        Nog geen gesloten trades.
+      <div style={{ background: C.card, borderRadius: 14, padding: "32px 0", textAlign: "center", boxShadow: C.shadow }}>
+        <EmptyState icon="📋" text="Nog geen gesloten trades" height={80} />
       </div>
     );
   }
   return (
-    <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 8, overflowX: "auto" }}>
+    <div style={{ background: C.card, borderRadius: 14, boxShadow: C.shadow, overflow: "hidden" }}>
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
         <thead>
-          <tr style={{ borderBottom: `1px solid ${C.border}` }}>
-            {["Tijd", "Setup", "Side", "Entry", "Exit", "Fases", "PnL"].map(h => (
-              <th key={h} style={{ padding: "8px 12px", textAlign: "left", color: "#333", fontWeight: 400, fontSize: 9, letterSpacing: 1, textTransform: "uppercase" }}>{h}</th>
+          <tr style={{ borderBottom: `1px solid ${C.border}`, background: "#fafbfd" }}>
+            {["Tijd", "Setup", "Side", "Entry", "Exit", "TP's", "PnL"].map(h => (
+              <th key={h} style={{ padding: "10px 16px", textAlign: "left", color: C.muted, fontWeight: 600, fontSize: 9, letterSpacing: 1, textTransform: "uppercase" }}>{h}</th>
             ))}
           </tr>
         </thead>
         <tbody>
           {[...trades].reverse().map((t, i) => (
-            <tr key={t.id || i} className="closed-row" style={{ borderBottom: `1px solid #0d0d0d` }}>
-              <td style={{ padding: "8px 12px", color: C.muted }}>{t.timestamp?.slice(11, 16)}</td>
-              <td style={{ padding: "8px 12px", color: C.blue, textTransform: "uppercase", fontSize: 10 }}>{t.setup_type}</td>
-              <td style={{ padding: "8px 12px", color: t.side === "buy" ? C.green : C.red, fontWeight: 700, textTransform: "uppercase" }}>{t.side}</td>
-              <td style={{ padding: "8px 12px" }}>{fmtP(t.entry_price)}</td>
-              <td style={{ padding: "8px 12px", color: "#555" }}>{fmtP(t.exit_price)}</td>
-              <td style={{ padding: "8px 12px" }}>
+            <tr key={t.id || i} className="closed-row" style={{ borderBottom: `1px solid ${C.border}` }}>
+              <td style={{ padding: "10px 16px", color: C.muted }}>{t.timestamp?.slice(11, 16)}</td>
+              <td style={{ padding: "10px 16px" }}>
+                <Tag color={C.blue} bg={C.blueBg}>{t.setup_type?.replace("_", " ")}</Tag>
+              </td>
+              <td style={{ padding: "10px 16px" }}>
+                <span style={{ color: t.side === "buy" ? C.green : C.red, fontWeight: 700, textTransform: "uppercase", fontSize: 11 }}>
+                  {t.side === "buy" ? "▲" : "▼"} {t.side}
+                </span>
+              </td>
+              <td style={{ padding: "10px 16px", fontWeight: 600 }}>{fmtP(t.entry_price)}</td>
+              <td style={{ padding: "10px 16px", color: C.muted }}>{fmtP(t.exit_price)}</td>
+              <td style={{ padding: "10px 16px" }}>
                 <div style={{ display: "flex", gap: 3 }}>
                   {["tp1_hit", "tp2_hit", "tp3_hit"].map((k, idx) => (
                     <span key={k} style={{
-                      fontSize: 9, padding: "1px 5px", borderRadius: 2,
-                      background: t[k] ? "#001a0d" : "#111",
-                      color: t[k] ? C.green : "#2a2a2a",
+                      fontSize: 9, padding: "1px 6px", borderRadius: 99, fontWeight: 700,
+                      background: t[k] ? C.greenBg : C.border,
+                      color:      t[k] ? C.green   : C.dim,
                     }}>TP{idx + 1}</span>
                   ))}
                 </div>
               </td>
-              <td style={{ padding: "8px 12px" }}><PnlBadge value={t.realized_pnl} /></td>
+              <td style={{ padding: "10px 16px" }}><PnlBadge value={t.realized_pnl} /></td>
             </tr>
           ))}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+// ─── Setup Stats Grid (analytics) ────────────────────────────────────────────
+
+function SetupStatsGrid({ stats }) {
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+      {SETUP_META.map(s => {
+        const d = stats?.[s.key];
+        const health = HEALTH[d?.health || 'healthy'];
+        const isDisabled = d?.health === 'disabled';
+        return (
+          <div key={s.key} style={{
+            background: "#fafbfd", border: `1px solid ${C.border}`,
+            borderLeft: `3px solid ${health.color}`,
+            borderRadius: 10, padding: "12px 14px",
+            opacity: isDisabled ? 0.6 : 1,
+          }}>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}>
+              <div>
+                <div style={{ fontSize: 10, color: C.blue, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5 }}>{s.label}</div>
+                <div style={{ fontSize: 9, color: C.dim, marginTop: 2 }}>{s.desc}</div>
+              </div>
+              <Tag color={health.color} bg={health.bg}>{health.label}</Tag>
+            </div>
+            <WinRateBar value={d?.win_rate ?? null} />
+            {d?.count > 0 && (
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginTop: 10 }}>
+                <div>
+                  <div style={{ fontSize: 8, color: C.muted, letterSpacing: 1 }}>TRADES</div>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: C.text, marginTop: 2 }}>{d.count}</div>
+                </div>
+                <div>
+                  <div style={{ fontSize: 8, color: C.muted, letterSpacing: 1 }}>GEM. PNL</div>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: d.avg_pnl >= 0 ? C.green : C.red, marginTop: 2 }}>
+                    {fmtSign(d.avg_pnl)}
+                  </div>
+                </div>
+                <div>
+                  <div style={{ fontSize: 8, color: C.muted, letterSpacing: 1 }}>WINST</div>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: C.text, marginTop: 2 }}>{d.wins}/{d.count}</div>
+                </div>
+                <div>
+                  <div style={{ fontSize: 8, color: C.muted, letterSpacing: 1 }}>PROF. FACTOR</div>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: d.profit_factor > 1 ? C.green : d.profit_factor != null ? C.red : C.muted, marginTop: 2 }}>
+                    {d.profit_factor ?? "—"}
+                  </div>
+                </div>
+              </div>
+            )}
+            {(!d || d.count === 0) && (
+              <div style={{ fontSize: 10, color: C.dim, fontStyle: "italic", marginTop: 6 }}>geen trades</div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -578,7 +640,7 @@ function BacktestPanel() {
   const [loading, setLoading] = useState(false);
 
   const pollBacktest = useCallback(async () => {
-    const res = await fetch(`${API_URL}/backtest`);
+    const res  = await fetch(`${API_URL}/backtest`);
     const data = await res.json();
     setBt(data);
     if (data.running) setTimeout(pollBacktest, 2000);
@@ -596,97 +658,106 @@ function BacktestPanel() {
   }
 
   const r = bt?.result;
+  const isPos = r?.total_pnl >= 0;
 
   return (
-    <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: 18, marginBottom: 16 }}>
+    <div style={{ background: C.card, borderRadius: 14, padding: 20, boxShadow: C.shadow, marginBottom: 20 }}>
       <SectionLabel>Backtest</SectionLabel>
 
-      {/* Config row */}
-      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 12, alignItems: "flex-end" }}>
-        <label style={{ flex: 1, minWidth: 100 }}>
-          <div style={{ fontSize: 9, color: C.muted, marginBottom: 4, letterSpacing: 1 }}>DAGEN</div>
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 14, alignItems: "flex-end" }}>
+        <label style={{ flex: 1, minWidth: 90 }}>
+          <div style={{ fontSize: 9, color: C.muted, marginBottom: 4, letterSpacing: 1, textTransform: "uppercase" }}>Dagen</div>
           <input type="number" min="30" max="365" value={btConfig.days}
             onChange={e => setBtConfig({ ...btConfig, days: +e.target.value })}
-            disabled={bt?.running} style={{ width: "100%" }} />
+            disabled={bt?.running} />
         </label>
-        <label style={{ flex: 1, minWidth: 100 }}>
-          <div style={{ fontSize: 9, color: C.muted, marginBottom: 4, letterSpacing: 1 }}>TEST %</div>
+        <label style={{ flex: 1, minWidth: 90 }}>
+          <div style={{ fontSize: 9, color: C.muted, marginBottom: 4, letterSpacing: 1, textTransform: "uppercase" }}>Test %</div>
           <input type="number" min="10" max="50" step="5" value={btConfig.test_pct * 100}
             onChange={e => setBtConfig({ ...btConfig, test_pct: +e.target.value / 100 })}
-            disabled={bt?.running} style={{ width: "100%" }} />
+            disabled={bt?.running} />
         </label>
-        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10, color: C.muted, paddingBottom: 2 }}>
+        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10, color: C.muted, paddingBottom: 8 }}>
           <input type="checkbox" checked={btConfig.session_filter}
             onChange={e => setBtConfig({ ...btConfig, session_filter: e.target.checked })}
             disabled={bt?.running} />
           Sessie filter
         </label>
         <button className="btn-primary" onClick={startBt} disabled={bt?.running || loading}
-          style={{ flex: 1, minWidth: 120 }}>
-          {bt?.running ? `${bt.progress}%…` : "▶ Run Backtest"}
+          style={{ flex: 1, minWidth: 130 }}>
+          {bt?.running ? `${bt.progress}% bezig…` : "▶  Run Backtest"}
         </button>
       </div>
 
-      {bt?.error && (
-        <div style={{ color: C.red, fontSize: 11, marginBottom: 8 }}>⚠ {bt.error}</div>
+      {bt?.running && (
+        <div style={{ height: 6, background: C.border, borderRadius: 99, overflow: "hidden", marginBottom: 16 }}>
+          <div style={{ height: "100%", width: `${bt.progress}%`, background: C.blue, borderRadius: 99, transition: "width 0.3s" }} />
+        </div>
       )}
+
+      {bt?.error && <div style={{ color: C.red, fontSize: 11, marginBottom: 10 }}>⚠ {bt.error}</div>}
 
       {r && (
         <>
-          {/* Summary stats */}
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
+          {/* Summary */}
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 14 }}>
             {[
-              { label: "Trades",      value: r.total_trades },
-              { label: "Win Rate",    value: `${r.win_rate}%`, color: r.win_rate >= 50 ? C.green : C.red },
-              { label: "Profit Factor", value: r.profit_factor ?? "—", color: r.profit_factor > 1 ? C.green : C.red },
-              { label: "Sharpe",      value: r.sharpe ?? "—", color: r.sharpe > 1 ? C.green : C.yellow },
-              { label: "Max DD",      value: r.max_drawdown_pct != null ? `-${r.max_drawdown_pct}%` : "—", color: r.max_drawdown_pct > 15 ? C.red : C.muted },
-              { label: "Total PnL",   value: fmtSign(r.total_pnl), color: r.total_pnl >= 0 ? C.green : C.red },
-              { label: "Expectancy",  value: fmtSign(r.expectancy), color: r.expectancy >= 0 ? C.green : C.red },
+              { label: "Trades",    value: r.total_trades,   color: C.text  },
+              { label: "Win Rate",  value: `${r.win_rate}%`, color: r.win_rate >= 50 ? C.green : C.red },
+              { label: "Prof. Factor", value: r.profit_factor ?? "—", color: r.profit_factor > 1 ? C.green : C.red },
+              { label: "Sharpe",    value: r.sharpe ?? "—",  color: r.sharpe > 1 ? C.green : C.yellow },
+              { label: "Max DD",    value: r.max_drawdown_pct != null ? `-${r.max_drawdown_pct}%` : "—", color: r.max_drawdown_pct > 15 ? C.red : C.muted },
+              { label: "PnL",       value: fmtSign(r.total_pnl), color: isPos ? C.green : C.red },
+              { label: "Expectancy",value: fmtSign(r.expectancy), color: r.expectancy >= 0 ? C.green : C.red },
             ].map(s => (
-              <div key={s.label} style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: 6, padding: "8px 12px", flex: 1, minWidth: 80 }}>
-                <div style={{ fontSize: 9, color: C.muted, letterSpacing: 1, marginBottom: 4 }}>{s.label}</div>
-                <div style={{ fontSize: 13, fontWeight: 700, color: s.color || C.text }}>{s.value}</div>
+              <div key={s.label} style={{ background: "#fafbfd", border: `1px solid ${C.border}`, borderRadius: 10, padding: "10px 14px", flex: 1, minWidth: 80 }}>
+                <div style={{ fontSize: 8, color: C.muted, letterSpacing: 1, textTransform: "uppercase", marginBottom: 4 }}>{s.label}</div>
+                <div style={{ fontSize: 14, fontWeight: 700, color: s.color }}>{s.value}</div>
               </div>
             ))}
           </div>
 
-          {/* Periode */}
-          <div style={{ fontSize: 9, color: "#2a2a2a", marginBottom: 10 }}>
+          <div style={{ fontSize: 9, color: C.dim, marginBottom: 12 }}>
             Train: {r.train_period} · Test: {r.test_period} · {r.duration_s}s
           </div>
 
-          {/* Equity curve */}
           {r.equity_curve?.length > 1 && (
-            <div style={{ marginBottom: 12 }}>
-              <div style={{ fontSize: 9, color: C.muted, letterSpacing: 1, marginBottom: 6 }}>EQUITY CURVE (BACKTEST)</div>
-              <ResponsiveContainer width="100%" height={120}>
-                <LineChart data={r.equity_curve} margin={{ top: 4, right: 6, left: -28, bottom: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#0f0f0f" vertical={false} />
-                  <XAxis dataKey="ts" stroke="transparent" tick={{ fill: "#2a2a2a", fontSize: 9 }} tickLine={false} interval="preserveStartEnd" />
-                  <YAxis stroke="transparent" tick={{ fill: "#2a2a2a", fontSize: 9 }} tickLine={false}
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 9, color: C.muted, letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>Equity Curve — Test Window</div>
+              <ResponsiveContainer width="100%" height={130}>
+                <AreaChart data={r.equity_curve} margin={{ top: 4, right: 6, left: -28, bottom: 0 }}>
+                  <defs>
+                    <linearGradient id="btGrad" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%"  stopColor={isPos ? C.greenLine : C.red} stopOpacity={0.2} />
+                      <stop offset="95%" stopColor={isPos ? C.greenLine : C.red} stopOpacity={0}   />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke={C.border} vertical={false} />
+                  <XAxis dataKey="ts" stroke="transparent" tick={{ fill: C.dim, fontSize: 9 }} tickLine={false} interval="preserveStartEnd" />
+                  <YAxis stroke="transparent" tick={{ fill: C.dim, fontSize: 9 }} tickLine={false}
                     tickFormatter={v => `$${(v/1000).toFixed(1)}k`} />
                   <Tooltip content={<EquityTooltip />} />
-                  <ReferenceLine y={r.equity_curve[0]?.equity} stroke="#1a1a1a" strokeDasharray="4 4" />
-                  <Line type="monotone" dataKey="equity" stroke={r.total_pnl >= 0 ? C.green : C.red} dot={false} strokeWidth={1.5} />
-                </LineChart>
+                  <ReferenceLine y={r.equity_curve[0]?.equity} stroke={C.border} strokeDasharray="4 4" />
+                  <Area type="monotone" dataKey="equity" stroke={isPos ? C.greenLine : C.red} strokeWidth={2}
+                    fill="url(#btGrad)" dot={false} />
+                </AreaChart>
               </ResponsiveContainer>
             </div>
           )}
 
-          {/* Per-setup breakdown */}
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 6 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr)", gap: 8 }}>
             {Object.entries(r.setup_stats || {}).map(([setup, d]) => (
-              <div key={setup} style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: 6, padding: "8px 10px" }}>
-                <div style={{ fontSize: 9, color: C.blue, letterSpacing: 1, textTransform: "uppercase", marginBottom: 6 }}>{setup}</div>
-                {d.trades === 0 ? (
-                  <div style={{ fontSize: 9, color: C.dimmer }}>geen trades</div>
-                ) : (
-                  <>
-                    <div style={{ fontSize: 11, fontWeight: 700, color: d.win_rate >= 50 ? C.green : C.red }}>{d.win_rate}%</div>
-                    <div style={{ fontSize: 9, color: C.muted, marginTop: 2 }}>{d.trades} trades · PF {d.profit_factor ?? "—"}</div>
-                  </>
-                )}
+              <div key={setup} style={{ background: "#fafbfd", border: `1px solid ${C.border}`, borderRadius: 10, padding: "10px 12px" }}>
+                <div style={{ fontSize: 9, color: C.blue, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 6 }}>
+                  {setup.replace("_", " ")}
+                </div>
+                {d.trades === 0
+                  ? <div style={{ fontSize: 9, color: C.dim }}>geen trades</div>
+                  : <>
+                      <div style={{ fontSize: 13, fontWeight: 800, color: d.win_rate >= 50 ? C.green : C.red }}>{d.win_rate}%</div>
+                      <div style={{ fontSize: 9, color: C.muted, marginTop: 2 }}>{d.trades} trades · PF {d.profit_factor ?? "—"}</div>
+                    </>
+                }
               </div>
             ))}
           </div>
@@ -758,132 +829,113 @@ export default function Dashboard() {
   return (
     <div style={{
       minHeight: "100vh", background: C.bg, color: C.text,
-      fontFamily: "'JetBrains Mono', monospace",
-      padding: "24px 28px", maxWidth: 1400, margin: "0 auto",
+      fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, sans-serif",
+      padding: "24px 28px", maxWidth: 1440, margin: "0 auto",
     }}>
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Syne:wght@700;800&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
         * { box-sizing: border-box; }
-        ::-webkit-scrollbar { width: 4px; background: #0a0a0a; }
-        ::-webkit-scrollbar-thumb { background: #222; border-radius: 2px; }
+        ::-webkit-scrollbar { width: 5px; background: ${C.bg}; }
+        ::-webkit-scrollbar-thumb { background: ${C.border}; border-radius: 3px; }
         .btn-primary {
-          background: ${C.green}; color: #000; border: none; border-radius: 6px;
+          background: ${C.blue}; color: #fff; border: none; border-radius: 8px;
           padding: 10px 20px; font-family: inherit; font-size: 11px; font-weight: 700;
-          letter-spacing: 1.5px; cursor: pointer; text-transform: uppercase;
-          transition: opacity 0.15s; width: 100%;
+          letter-spacing: 0.5px; cursor: pointer; text-transform: uppercase;
+          transition: opacity 0.15s; width: 100%; box-shadow: 0 2px 8px ${C.blue}44;
         }
-        .btn-primary:hover { opacity: 0.85; }
-        .btn-primary:disabled { opacity: 0.3; cursor: not-allowed; }
+        .btn-primary:hover:not(:disabled) { opacity: 0.88; }
+        .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
         .btn-danger {
-          background: transparent; color: ${C.red}; border: 1px solid ${C.red}44;
-          border-radius: 6px; padding: 10px 20px; font-family: inherit; font-size: 11px;
-          font-weight: 700; letter-spacing: 1.5px; cursor: pointer; text-transform: uppercase;
+          background: ${C.redBg}; color: ${C.red}; border: 1px solid ${C.red}44;
+          border-radius: 8px; padding: 10px 20px; font-family: inherit; font-size: 11px;
+          font-weight: 700; letter-spacing: 0.5px; cursor: pointer; text-transform: uppercase;
           transition: background 0.15s; width: 100%;
         }
-        .btn-danger:hover { background: ${C.red}11; }
-        select, input {
-          background: #0d0d0d; border: 1px solid #1e1e1e; color: ${C.text};
-          font-family: inherit; font-size: 11px; padding: 7px 10px;
-          border-radius: 6px; outline: none; width: 100%;
+        .btn-danger:hover:not(:disabled) { background: ${C.red}18; }
+        select, input[type="number"], input[type="text"] {
+          background: #fafbfd; border: 1px solid ${C.border}; color: ${C.text};
+          font-family: inherit; font-size: 12px; padding: 8px 12px;
+          border-radius: 8px; outline: none; width: 100%; transition: border-color 0.15s;
         }
-        select:focus, input:focus { border-color: ${C.green}44; }
-        .closed-row:hover { background: #0d0d0d !important; }
-        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.2} }
-        .pulse { animation: pulse 1.6s infinite; }
-        @media (max-width: 900px) {
-          .main-grid    { grid-template-columns: 1fr !important; }
+        select:focus, input:focus { border-color: ${C.blue}88; box-shadow: 0 0 0 3px ${C.blue}15; }
+        .closed-row:hover { background: #fafbfd; }
+        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
+        .pulse { animation: pulse 2s infinite; }
+        @media (max-width: 960px) {
+          .main-grid { grid-template-columns: 1fr !important; }
           .analytics-grid { grid-template-columns: 1fr !important; }
-        }
-        @media (max-width: 600px) {
-          .stats-row > div { min-width: 45% !important; }
         }
       `}</style>
 
-      {/* Circuit Breaker Banner */}
       <CircuitBreakerBanner status={status} />
 
-      {/* Header */}
+      {/* ── Header ─────────────────────────────────────────────────────────── */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 24 }}>
         <div>
-          <div style={{ fontFamily: "'Syne', sans-serif", fontSize: 22, fontWeight: 800, letterSpacing: -0.5 }}>
-            ₿ TRADE<span style={{ color: C.green }}>BOT</span>
+          <div style={{ fontSize: 22, fontWeight: 800, letterSpacing: -0.5, color: C.text }}>
+            Trade<span style={{ color: C.blue }}>Bot</span>
           </div>
-          <div style={{ color: "#2a2a2a", fontSize: 9, letterSpacing: 2.5, marginTop: 2 }}>
-            OKX · DOOPIECASH METHOD · 15M/1H
+          <div style={{ fontSize: 10, color: C.muted, marginTop: 2, letterSpacing: 1 }}>
+            OKX · DoopieCash Method · 15M / 1H / 4H
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          {status?.consecutive_stops > 0 && (
-            <span style={{ fontSize: 9, color: C.red + "88", letterSpacing: 1 }}>
-              {status.consecutive_stops} STOP{status.consecutive_stops !== 1 ? "S" : ""} OP RIJ
-            </span>
-          )}
           {status?.daily_loss_pct < -1 && (
-            <span style={{ fontSize: 9, color: C.yellow + "99", letterSpacing: 1 }}>
-              DAY {fmt(status.daily_loss_pct, 1)}%
-            </span>
+            <Tag color={C.yellow} bg={C.yellowBg}>DAY {fmt(status.daily_loss_pct, 1)}%</Tag>
           )}
-          <div className="pulse" style={{
-            width: 6, height: 6, borderRadius: "50%",
-            background: isRunning ? C.green : "#2a2a2a",
-          }} />
-          <span style={{ fontSize: 9, color: isRunning ? C.green : "#333", letterSpacing: 2 }}>
-            {isRunning ? "LIVE" : "OFFLINE"}
-          </span>
+          <SessionIndicator />
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <div className={isRunning ? "pulse" : ""} style={{
+              width: 8, height: 8, borderRadius: "50%",
+              background: isRunning ? C.green : C.dim,
+              boxShadow: isRunning ? `0 0 0 3px ${C.green}33` : "none",
+            }} />
+            <span style={{ fontSize: 11, color: isRunning ? C.green : C.muted, fontWeight: 600 }}>
+              {isRunning ? "Live" : "Offline"}
+            </span>
+          </div>
         </div>
       </div>
 
-      {/* Error banner */}
       {error && (
         <div style={{
-          background: "#180808", border: `1px solid ${C.red}33`, borderRadius: 6,
-          padding: "8px 14px", marginBottom: 18, color: C.red, fontSize: 11,
+          background: C.redBg, border: `1px solid ${C.red}33`, borderRadius: 10,
+          padding: "10px 16px", marginBottom: 18, color: C.red, fontSize: 11, fontWeight: 600,
         }}>⚠ {error}</div>
       )}
 
-      {/* Stats row */}
-      <div className="stats-row" style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 20 }}>
-        <StatCard label="Balance"     value={status ? `$${fmt(status.balance, 0)}` : "—"}  sub="USDT vrij"   accent={C.green} />
-        <StatCard label="Equity"      value={status ? `$${fmt(status.equity,  0)}` : "—"}  sub="USDT totaal" />
-        <StatCard label="Total PnL"   value={<PnlBadge value={status?.total_pnl} />} />
-        <StatCard label="Win Rate"    value={winRate != null ? `${winRate}%` : "—"}
-          sub={`${status?.winning_trades || 0}/${closedTrades.length} trades`} />
-        <StatCard label="Actief"      value={activeTrades.length}
-          sub={activeTrades.length > 0 ? activeTrades.map(t => t.setup_type).join(", ") : "geen open trades"}
-          accent={activeTrades.length > 0 ? C.yellow : undefined} />
-        <StatCard label="Last Signal" value={status?.last_setup?.toUpperCase() || "—"}
-          sub={status?.last_signal?.toUpperCase() || ""}
-          accent={status?.last_signal === "buy" ? C.green : status?.last_signal === "sell" ? C.red : undefined} />
-        <StatCard label="Sharpe"   value={stats?.sharpe_ratio ?? "—"}
-          sub="annualized"
-          accent={stats?.sharpe_ratio > 1 ? C.green : stats?.sharpe_ratio != null ? C.yellow : undefined} />
-        <StatCard label="Max DD"   value={stats?.max_drawdown_pct != null ? `-${stats.max_drawdown_pct}%` : "—"}
-          sub="van equity piek"
-          accent={stats?.max_drawdown_pct > 10 ? C.red : C.muted} />
+      {/* ── Stats row ──────────────────────────────────────────────────────── */}
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 24 }}>
+        <StatCard label="Balance"     value={status ? `$${fmt(status.balance, 0)}` : "—"}     sub="USDT vrij"     accent={C.blue}  />
+        <StatCard label="Equity"      value={status ? `$${fmt(status.equity,  0)}` : "—"}     sub="USDT totaal"                    />
+        <StatCard label="Total PnL"   value={<PnlBadge value={status?.total_pnl} size={18} />}                                     />
+        <StatCard label="Win Rate"    value={winRate != null ? `${winRate}%` : "—"}            sub={`${status?.winning_trades || 0}/${closedTrades.length}`} accent={winRate >= 50 ? C.green : winRate != null ? C.red : undefined} />
+        <StatCard label="Sharpe"      value={stats?.sharpe_ratio ?? "—"}                       sub="annualized"   accent={stats?.sharpe_ratio > 1 ? C.green : undefined} />
+        <StatCard label="Max DD"      value={stats?.max_drawdown_pct != null ? `-${stats.max_drawdown_pct}%` : "—"} sub="van piek" accent={stats?.max_drawdown_pct > 10 ? C.red : undefined} />
+        <StatCard label="Actief"      value={activeTrades.length}                              sub={activeTrades.length > 0 ? activeTrades.map(t => t.setup_type).join(", ") : "geen"} accent={activeTrades.length > 0 ? C.yellow : undefined} />
       </div>
 
-      {/* Main grid: Config | Active trades + Equity curve */}
-      <div className="main-grid" style={{ display: "grid", gridTemplateColumns: "260px 1fr", gap: 16, marginBottom: 16 }}>
+      {/* ── Main grid ──────────────────────────────────────────────────────── */}
+      <div className="main-grid" style={{ display: "grid", gridTemplateColumns: "260px 1fr", gap: 20, marginBottom: 20 }}>
+
+        {/* Sidebar */}
         <div>
           <ConfigPanel
             config={config} setConfig={setConfig}
             isRunning={isRunning} loading={loading}
             onStart={startBot} onStop={stopBot}
           />
-          <StrategyLegend />
+          <SetupHealthPanel setupHealth={status?.setup_health} />
         </div>
 
+        {/* Main */}
         <div>
           {/* Active trades */}
-          <div style={{ marginBottom: 16 }}>
+          <div style={{ marginBottom: 20 }}>
             <SectionLabel badge={activeTrades.length}>Actieve trades</SectionLabel>
             {activeTrades.length === 0 ? (
-              <div style={{
-                background: C.card, border: `1px solid ${C.border}`, borderRadius: 8,
-                padding: "28px 20px", textAlign: "center",
-              }}>
-                <div style={{ fontSize: 11, color: C.dim }}>Geen actieve trades</div>
-                <div style={{ fontSize: 10, color: C.dimmer, marginTop: 4 }}>Bot zoekt naar een setup...</div>
+              <div style={{ background: C.card, borderRadius: 14, boxShadow: C.shadow }}>
+                <EmptyState icon="🔍" text="Geen actieve trades" sub="Bot zoekt naar een setup…" height={100} />
               </div>
             ) : (
               activeTrades.map((t, i) => <ActiveTradeCard key={t.id || i} trade={t} />)
@@ -891,33 +943,33 @@ export default function Dashboard() {
           </div>
 
           {/* Equity curve */}
-          <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: 16 }}>
-            <SectionLabel>Equity curve</SectionLabel>
+          <div style={{ background: C.card, borderRadius: 14, padding: 20, boxShadow: C.shadow }}>
+            <SectionLabel>Equity Curve</SectionLabel>
             <EquityCurve history={stats?.equity_history} />
           </div>
         </div>
       </div>
 
-      {/* Analytics: Daily PnL + Setup stats */}
-      <div className="analytics-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 16 }}>
-        <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: 16 }}>
+      {/* ── Analytics ──────────────────────────────────────────────────────── */}
+      <div className="analytics-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20, marginBottom: 20 }}>
+        <div style={{ background: C.card, borderRadius: 14, padding: 20, boxShadow: C.shadow }}>
           <SectionLabel>Dagelijks PnL</SectionLabel>
           <DailyPnlChart data={stats?.daily_pnl} />
         </div>
-        <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: 16 }}>
+        <div style={{ background: C.card, borderRadius: 14, padding: 20, boxShadow: C.shadow }}>
           <SectionLabel>Setup statistieken</SectionLabel>
           <SetupStatsGrid stats={stats?.setup_stats} />
         </div>
       </div>
 
-      {/* Backtest */}
+      {/* ── Backtest ───────────────────────────────────────────────────────── */}
       <BacktestPanel />
 
-      {/* Closed trades */}
+      {/* ── Closed trades ──────────────────────────────────────────────────── */}
       <SectionLabel badge={closedTrades.length}>Gesloten trades</SectionLabel>
       <ClosedTradesTable trades={closedTrades} />
 
-      <div style={{ marginTop: 24, textAlign: "center", color: C.dimmer, fontSize: 9, letterSpacing: 1 }}>
+      <div style={{ marginTop: 28, textAlign: "center", color: C.dim, fontSize: 9, letterSpacing: 1.5 }}>
         VERVERST ELKE 5S · {new Date().toLocaleTimeString("nl-NL")} · USE AT YOUR OWN RISK
       </div>
     </div>
