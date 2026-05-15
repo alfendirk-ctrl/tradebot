@@ -1,6 +1,8 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
+import os
 import threading
 import time
 from bot import state, run_bot, get_setup_health, SETUP_TYPES, get_public_exchange, get_exchange
@@ -253,3 +255,19 @@ def get_monte_carlo():
         "error":    monte_carlo_state.error,
         "result":   monte_carlo_state.result,
     }
+
+
+# ── SPA static files (dashboard/dist, built by nixpacks) ─────────────────────
+
+_DIST = os.path.join(os.path.dirname(__file__), "dashboard", "dist")
+
+@app.get("/", include_in_schema=False)
+async def spa_root():
+    return FileResponse(os.path.join(_DIST, "index.html"))
+
+@app.get("/{full_path:path}", include_in_schema=False)
+async def spa_fallback(full_path: str):
+    file = os.path.join(_DIST, full_path)
+    if os.path.isfile(file):
+        return FileResponse(file)
+    return FileResponse(os.path.join(_DIST, "index.html"))
