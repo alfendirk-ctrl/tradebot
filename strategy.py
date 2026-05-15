@@ -488,7 +488,8 @@ def calc_atr(candles: list, period: int = 14) -> float:
 # ─── Main Analyzer ────────────────────────────────────────────────────────────
 
 def analyze(candles_15m: list, candles_1h: list, cooldown_candles: int = 0,
-            candles_4h: list = None, session_filter: bool = True) -> Optional[Signal]:
+            candles_4h: list = None, session_filter: bool = True,
+            disabled_setups: list = None) -> Optional[Signal]:
     """
     Analyseer de markt op alle 4 DoopieCash setups.
     Gebruikt 4h (indien opgegeven) als macro-bias, 1h voor trendrichting, 15m voor instap.
@@ -533,12 +534,16 @@ def analyze(candles_15m: list, candles_1h: list, cooldown_candles: int = 0,
         f"Levels: {len(all_levels)} | Sessie: {session_name}"
     )
 
-    # Check setups in volgorde van prioriteit
+    # Check setups in volgorde van prioriteit (sla uitgeschakelde setups over)
+    off = set(disabled_setups or [])
+    if off:
+        logger.info(f"Uitgeschakelde setups: {', '.join(off)}")
+
     signal = (
-        check_rotation(candles_15m, structure_1h) or
-        check_breakout(candles_15m, all_levels, structure_1h) or
-        check_continuation(candles_15m, all_levels, structure_1h) or
-        check_range(candles_15m, structure_1h)
+        (check_rotation(candles_15m, structure_1h)              if 'rotation'     not in off else None) or
+        (check_breakout(candles_15m, all_levels, structure_1h)  if 'breakout'     not in off else None) or
+        (check_continuation(candles_15m, all_levels, structure_1h) if 'continuation' not in off else None) or
+        (check_range(candles_15m, structure_1h)                 if 'range'        not in off else None)
     )
 
     if signal:

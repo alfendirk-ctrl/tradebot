@@ -3,9 +3,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import threading
 import time
-from bot import state, run_bot
+from bot import state, run_bot, get_setup_health, SETUP_TYPES
 from dataclasses import asdict
 from db import clear_trades as db_clear_trades
+import math
 
 app = FastAPI(title="BTC Trading Bot API")
 
@@ -46,6 +47,8 @@ def get_status():
         "circuit_breaker_active": bool(state.circuit_breaker_until and time.time() < state.circuit_breaker_until),
         "circuit_breaker_until": state.circuit_breaker_until if state.circuit_breaker_until and time.time() < state.circuit_breaker_until else None,
         "daily_loss_pct": round((state.equity - state.day_start_equity) / state.day_start_equity * 100, 2) if state.day_start_equity > 0 else 0.0,
+        "disabled_setups": state.disabled_setups,
+        "setup_health": {s: get_setup_health(s) for s in SETUP_TYPES},
     }
 
 @app.post("/start")
@@ -71,20 +74,24 @@ def stop_bot():
 def get_stats():
     closed = [t for t in state.trades if t.status == "closed"]
 
-    # Per-setup statistieken
+    # Per-setup statistieken + gezondheid
     setup_stats = {}
-    for setup in ["breakout", "range", "continuation", "rotation"]:
+    for setup in SETUP_TYPES:
         ts = [t for t in closed if t.setup_type == setup]
         wins   = [t for t in ts if t.realized_pnl > 0]
         losses = [t for t in ts if t.realized_pnl <= 0]
         gross_profit = sum(t.realized_pnl for t in wins)
         gross_loss   = abs(sum(t.realized_pnl for t in losses))
+        health = get_setup_health(setup)
         setup_stats[setup] = {
             "count": len(ts),
             "wins": len(wins),
             "win_rate": round(len(wins) / len(ts) * 100) if ts else 0,
             "avg_pnl": round(sum(t.realized_pnl for t in ts) / len(ts), 2) if ts else 0,
             "profit_factor": round(gross_profit / gross_loss, 2) if gross_loss > 0 else None,
+            "health": health['status'],
+            "recent_win_rate": round(health['win_rate'] * 100) if health['win_rate'] is not None else None,
+            "recent_trades": health['trades'],
         }
 
     # Dagelijkse PnL gegroepeerd op datum (YYYY-MM-DD)
@@ -94,10 +101,37 @@ def get_stats():
         daily[day] = round(daily.get(day, 0.0) + t.realized_pnl, 2)
     daily_pnl = [{"date": k, "pnl": v} for k, v in sorted(daily.items())]
 
+    # Sharpe ratio op basis van dagelijkse PnL (annualized, ≥2 dagen nodig)
+    sharpe = None
+    if len(daily_pnl) >= 2:
+        returns = [d['pnl'] for d in daily_pnl]
+        n = len(returns)
+        mean_r = sum(returns) / n
+        variance = sum((r - mean_r) ** 2 for r in returns) / (n - 1)
+        std_r = math.sqrt(variance) if variance > 0 else 0
+        if std_r > 0:
+            sharpe = round(mean_r / std_r * math.sqrt(252), 2)
+
+    # Max drawdown vanuit equity history
+    max_drawdown = None
+    if len(state.equity_history) >= 2:
+        equities = [e['equity'] for e in state.equity_history]
+        peak = equities[0]
+        max_dd = 0.0
+        for eq in equities:
+            if eq > peak:
+                peak = eq
+            dd = (peak - eq) / peak if peak > 0 else 0
+            if dd > max_dd:
+                max_dd = dd
+        max_drawdown = round(max_dd * 100, 2)  # als percentage
+
     return {
         "equity_history": state.equity_history,
         "setup_stats": setup_stats,
         "daily_pnl": daily_pnl,
+        "sharpe_ratio": sharpe,
+        "max_drawdown_pct": max_drawdown,
     }
 
 

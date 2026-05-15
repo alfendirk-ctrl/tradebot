@@ -396,24 +396,48 @@ function DailyPnlChart({ data }) {
 
 // ─── Setup Stats ──────────────────────────────────────────────────────────────
 
+const HEALTH_COLOR = { healthy: C.green, degrading: C.yellow, disabled: C.red };
+const HEALTH_LABEL = { healthy: "ACTIEF", degrading: "DEGRADING", disabled: "DISABLED" };
+
 function SetupStatsGrid({ stats }) {
   return (
     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
       {SETUP_META.map(s => {
         const d = stats?.[s.key];
+        const health = d?.health || 'healthy';
+        const healthColor = HEALTH_COLOR[health];
+        const isDisabled = health === 'disabled';
         return (
-          <div key={s.key} style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: 8, padding: "12px 14px" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}>
+          <div key={s.key} style={{
+            background: C.bg,
+            border: `1px solid ${isDisabled ? C.red + '44' : C.border}`,
+            borderRadius: 8, padding: "12px 14px",
+            opacity: isDisabled ? 0.6 : 1,
+          }}>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
               <div>
-                <div style={{ fontSize: 10, color: C.blue, letterSpacing: 1, textTransform: "uppercase" }}>{s.label}</div>
+                <div style={{ fontSize: 10, color: isDisabled ? C.red : C.blue, letterSpacing: 1, textTransform: "uppercase" }}>{s.label}</div>
                 <div style={{ fontSize: 9, color: "#2a2a2a", marginTop: 1 }}>{s.desc}</div>
               </div>
-              {d?.count > 0 && (
-                <div style={{ fontSize: 11, fontWeight: 700, color: d.win_rate >= 50 ? C.green : C.red }}>
-                  {d.win_rate}%
+              <div style={{ textAlign: "right" }}>
+                {d?.count > 0 && (
+                  <div style={{ fontSize: 11, fontWeight: 700, color: d.win_rate >= 50 ? C.green : C.red }}>
+                    {d.win_rate}%
+                  </div>
+                )}
+                <div style={{ fontSize: 8, color: healthColor, letterSpacing: 1, marginTop: 2 }}>
+                  {HEALTH_LABEL[health]}
                 </div>
-              )}
+              </div>
             </div>
+            {d?.recent_win_rate != null && (
+              <div style={{ fontSize: 9, color: C.muted, marginBottom: 6 }}>
+                Laatste {d.recent_trades} trades:{" "}
+                <span style={{ color: d.recent_win_rate >= 50 ? C.green : C.red, fontWeight: 700 }}>
+                  {d.recent_win_rate}%
+                </span>
+              </div>
+            )}
             {!d || d.count === 0 ? (
               <div style={{ fontSize: 10, color: C.dimmer, fontStyle: "italic" }}>geen trades</div>
             ) : (
@@ -703,6 +727,12 @@ export default function Dashboard() {
         <StatCard label="Last Signal" value={status?.last_setup?.toUpperCase() || "—"}
           sub={status?.last_signal?.toUpperCase() || ""}
           accent={status?.last_signal === "buy" ? C.green : status?.last_signal === "sell" ? C.red : undefined} />
+        <StatCard label="Sharpe"   value={stats?.sharpe_ratio ?? "—"}
+          sub="annualized"
+          accent={stats?.sharpe_ratio > 1 ? C.green : stats?.sharpe_ratio != null ? C.yellow : undefined} />
+        <StatCard label="Max DD"   value={stats?.max_drawdown_pct != null ? `-${stats.max_drawdown_pct}%` : "—"}
+          sub="van equity piek"
+          accent={stats?.max_drawdown_pct > 10 ? C.red : C.muted} />
       </div>
 
       {/* Main grid: Config | Active trades + Equity curve */}

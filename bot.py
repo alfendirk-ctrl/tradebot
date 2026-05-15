@@ -58,6 +58,8 @@ class BotState:
     equity_history: list = field(default_factory=list)
     # Live price polling: timestamp van laatste 60s check
     last_live_check: float = 0.0
+    # Setup gezondheid: setups die tijdelijk uitgeschakeld zijn
+    disabled_setups: list = field(default_factory=list)  # ['rotation', 'range', ...]
 
 state = BotState()
 
@@ -290,6 +292,7 @@ def manage_open_trades(exchange, candles_15m):
             trade.status = "closed"
             trade.exit_price = curr_price
             update_trade(asdict(trade))
+            _update_setup_health()
 
             _record_equity()
             state.consecutive_stops += 1
@@ -358,6 +361,68 @@ def manage_open_trades(exchange, candles_15m):
             # Runner fase: SL continu trailen op elke nieuwe candle
             trail_sl_to_structure(trade, candles_15m, phase=4)
             update_trade(asdict(trade))
+
+SETUP_TYPES = ['rotation', 'breakout', 'continuation', 'range']
+HEALTH_WINDOW      = 20   # aantal recente trades per setup om te beoordelen
+DISABLE_THRESHOLD  = 0.40 # win rate onder deze grens → disable
+RECOVERY_THRESHOLD = 0.50 # win rate boven deze grens → re-enable
+MIN_TRADES_TO_JUDGE = 10  # minimaal nodig voordat we een oordeel vellen
+
+
+def get_setup_health(setup: str) -> dict:
+    """
+    Bereken win rate en status voor een setup op basis van de laatste HEALTH_WINDOW trades.
+    Geeft: {'win_rate': float, 'trades': int, 'status': 'healthy'|'degrading'|'disabled'}
+    """
+    closed = [t for t in state.trades if t.status == "closed" and t.setup_type == setup]
+    recent = closed[-HEALTH_WINDOW:]
+    n = len(recent)
+    if n == 0:
+        return {'win_rate': None, 'trades': 0, 'status': 'healthy'}
+
+    wins = sum(1 for t in recent if t.realized_pnl > 0)
+    win_rate = wins / n
+
+    if setup in state.disabled_setups:
+        status = 'disabled'
+    elif n >= MIN_TRADES_TO_JUDGE and win_rate < DISABLE_THRESHOLD:
+        status = 'degrading'
+    else:
+        status = 'healthy'
+
+    return {'win_rate': round(win_rate, 3), 'trades': n, 'status': status}
+
+
+def _update_setup_health():
+    """
+    Controleer na elke gesloten trade of een setup gedegradeerd of hersteld is.
+    Schakelt automatisch uit bij win rate < 40% (≥10 trades) en weer in bij ≥50%.
+    """
+    for setup in SETUP_TYPES:
+        health = get_setup_health(setup)
+        n = health['trades']
+        wr = health['win_rate']
+        currently_disabled = setup in state.disabled_setups
+
+        if not currently_disabled and wr is not None and n >= MIN_TRADES_TO_JUDGE and wr < DISABLE_THRESHOLD:
+            state.disabled_setups.append(setup)
+            msg = (
+                f"⚠️ <b>SETUP UITGESCHAKELD: {setup.upper()}</b>\n"
+                f"Win rate laatste {n} trades: {wr*100:.0f}% (drempel: {DISABLE_THRESHOLD*100:.0f}%)\n"
+                f"Setup hervat automatisch zodra win rate ≥{RECOVERY_THRESHOLD*100:.0f}%"
+            )
+            logger.warning(f"Setup {setup} uitgeschakeld: win rate {wr*100:.0f}%")
+            send_telegram(msg)
+
+        elif currently_disabled and wr is not None and wr >= RECOVERY_THRESHOLD:
+            state.disabled_setups.remove(setup)
+            msg = (
+                f"✅ <b>SETUP HERSTELD: {setup.upper()}</b>\n"
+                f"Win rate laatste {n} trades: {wr*100:.0f}% — setup weer actief"
+            )
+            logger.info(f"Setup {setup} hersteld: win rate {wr*100:.0f}%")
+            send_telegram(msg)
+
 
 def _check_open_trades_live(exchange):
     """
@@ -454,7 +519,11 @@ def run_bot():
 
                 open_count = sum(1 for t in state.trades if t.status != "closed")
                 if open_count == 0:
-                    signal = analyze(candles_15m, candles_1h, candles_4h=candles_4h)
+                    signal = analyze(
+                        candles_15m, candles_1h,
+                        candles_4h=candles_4h,
+                        disabled_setups=state.disabled_setups,
+                    )
 
                     # Signal expiry check: als entry >0.5% van huidige prijs afwijkt, verwerp
                     if signal:
