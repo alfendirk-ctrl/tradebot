@@ -51,7 +51,6 @@ const SETUP_META = [
   { key: "rotation",        label: "Rotation",     desc: "Structuurbreuk"        },
   { key: "breakout",        label: "Breakout",     desc: "Break + retest"        },
   { key: "continuation",    label: "Continuation", desc: "Pullback constructie"  },
-  { key: "range",           label: "Range",        desc: "Long/short extreme"    },
 ];
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
@@ -629,6 +628,64 @@ function SetupStatsGrid({ stats }) {
         );
       })}
     </div>
+  );
+}
+
+// ─── Candle Chart (SVG) ───────────────────────────────────────────────────────
+
+function CandleChart({ candles, entry, sl, tp1, tp2, tp3, side }) {
+  if (!candles || candles.length === 0) return <EmptyState icon="📊" text="Geen candle data opgeslagen" sub="Trades die na deze update zijn geopend bevatten een snapshot" height={140} />;
+
+  const W = 560, H = 180;
+  const PAD = { top: 18, right: 58, bottom: 4, left: 4 };
+  const plotW = W - PAD.left - PAD.right;
+  const plotH = H - PAD.top - PAD.bottom;
+
+  const allPrices = [entry, sl, tp1, tp2, tp3, ...candles.flatMap(c => [c[2], c[3]])].filter(Boolean);
+  const minP = Math.min(...allPrices);
+  const maxP = Math.max(...allPrices);
+  const span = maxP - minP || 1;
+
+  const xScale = (i) => PAD.left + (i + 0.5) * (plotW / candles.length);
+  const yScale = (p) => PAD.top + plotH - ((p - minP) / span) * plotH;
+  const cw = Math.max(1, plotW / candles.length - 1.5);
+
+  const lines = [
+    { p: entry, color: "#ffffff", label: "ENTRY", dash: "none" },
+    { p: sl,    color: "#e63946", label: "SL",    dash: "4 3"  },
+    { p: tp1,   color: "#00b37e", label: "TP1",   dash: "4 3"  },
+    { p: tp2,   color: "#00b37e", label: "TP2",   dash: "4 3"  },
+    { p: tp3,   color: "#00b37e", label: "TP3",   dash: "4 3"  },
+  ].filter(l => l.p != null);
+
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: "auto", background: "#1a1d2e", borderRadius: 8, display: "block" }}>
+      {lines.map(({ p, color, label, dash }) => {
+        const y = yScale(p);
+        return (
+          <g key={label}>
+            <line x1={PAD.left} x2={W - PAD.right} y1={y} y2={y}
+              stroke={color} strokeWidth={0.8} strokeDasharray={dash} opacity={0.85} />
+            <text x={W - PAD.right + 3} y={y + 3.5} fill={color} fontSize={7.5}
+              fontFamily="monospace" fontWeight="600">{label}</text>
+          </g>
+        );
+      })}
+      {candles.map((c, i) => {
+        const [, open, high, low, close] = c;
+        const bull = close >= open;
+        const col = bull ? "#00b37e" : "#e63946";
+        const x = xScale(i);
+        const bodyTop = Math.min(yScale(open), yScale(close));
+        const bodyH   = Math.max(0.8, Math.abs(yScale(open) - yScale(close)));
+        return (
+          <g key={i}>
+            <line x1={x} x2={x} y1={yScale(high)} y2={yScale(low)} stroke={col} strokeWidth={0.8} />
+            <rect x={x - cw / 2} y={bodyTop} width={cw} height={bodyH} fill={col} opacity={0.85} />
+          </g>
+        );
+      })}
+    </svg>
   );
 }
 

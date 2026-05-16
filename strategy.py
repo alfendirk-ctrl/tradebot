@@ -625,9 +625,11 @@ def analyze(candles_15m: list, candles_1h: list, cooldown_candles: int = 0,
     if off:
         logger.info(f"Uitgeschakelde setups: {', '.join(off)}")
 
-    # Alleen Liquidity Sweep actief (Breakout PF < 1 op backtest)
     signal = (
-        (check_liquidity_sweep(candles_15m, all_levels, structure_1h) if 'liquidity_sweep' not in off else None)
+        (check_liquidity_sweep(candles_15m, all_levels, structure_1h) if 'liquidity_sweep' not in off else None) or
+        (check_rotation(candles_15m, structure_1h) if 'rotation' not in off else None) or
+        (check_breakout(candles_15m, all_levels, structure_1h) if 'breakout' not in off else None) or
+        (check_continuation(candles_15m, all_levels, structure_1h) if 'continuation' not in off else None)
     )
 
     if signal:

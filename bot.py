@@ -33,6 +33,8 @@ class Trade:
     tp3_hit: bool = False
     exit_price: Optional[float] = None
     realized_pnl: float = 0.0
+    review_label: Optional[str] = None
+    review_note: Optional[str] = None
 
 @dataclass
 class BotState:
@@ -133,7 +135,7 @@ def calculate_position_size(balance: float, entry: float, stop: float,
         return 0
     return round(risk_amount / risk_per_unit, 6)
 
-def place_order(exchange, symbol: str, signal: Signal, qty: float) -> Optional[Trade]:
+def place_order(exchange, symbol: str, signal: Signal, qty: float, candles_15m: list = None) -> Optional[Trade]:
     mode = "SIM" if state.sim_mode else "LIVE"
     if state.sim_mode:
         trade = Trade(
@@ -163,6 +165,9 @@ def place_order(exchange, symbol: str, signal: Signal, qty: float) -> Optional[T
             f"<i>{signal.reason}</i>"
         )
         save_trade(asdict(trade))
+        if candles_15m:
+            from db import save_candle_snapshot
+            save_candle_snapshot(trade.id, candles_15m[-50:])
         return trade
     else:
         try:
@@ -194,6 +199,9 @@ def place_order(exchange, symbol: str, signal: Signal, qty: float) -> Optional[T
                 f"<i>{signal.reason}</i>"
             )
             save_trade(asdict(trade))
+            if candles_15m:
+                from db import save_candle_snapshot
+                save_candle_snapshot(trade.id, candles_15m[-50:])
             return trade
         except Exception as e:
             logger.error(f"Order mislukt: {e}")
@@ -362,7 +370,7 @@ def manage_open_trades(exchange, candles_15m):
             trail_sl_to_structure(trade, candles_15m, phase=4)
             update_trade(asdict(trade))
 
-SETUP_TYPES = ['liquidity_sweep', 'rotation', 'breakout', 'continuation', 'range']
+SETUP_TYPES = ['liquidity_sweep', 'rotation', 'breakout', 'continuation']
 HEALTH_WINDOW      = 20   # aantal recente trades per setup om te beoordelen
 DISABLE_THRESHOLD  = 0.40 # win rate onder deze grens → disable
 RECOVERY_THRESHOLD = 0.50 # win rate boven deze grens → re-enable
@@ -551,7 +559,7 @@ def run_bot():
                             signal.stop_loss, state.risk_per_trade, vol_scale
                         )
                         if qty > 0:
-                            trade = place_order(exchange, state.symbol, signal, qty)
+                            trade = place_order(exchange, state.symbol, signal, qty, candles_15m)
                             if trade:
                                 state.trades.append(trade)
                     else:

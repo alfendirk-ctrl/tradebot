@@ -7,7 +7,7 @@ import threading
 import time
 from bot import state, run_bot, get_setup_health, SETUP_TYPES, get_public_exchange, get_exchange
 from dataclasses import asdict
-from db import clear_trades as db_clear_trades
+from db import clear_trades as db_clear_trades, get_trade_candles, save_review, load_reviews_summary
 from backtest import (
     BacktestConfig, backtest_state, run_backtest,
     monte_carlo_state, run_monte_carlo,
@@ -153,6 +153,31 @@ def clear_trades():
     state.total_pnl = 0.0
     db_clear_trades()
     return {"message": "Trade history cleared"}
+
+
+class ReviewRequest(BaseModel):
+    label: str  # "good_entry" | "too_early" | "wrong_setup" | "bad_rr" | "false_signal"
+    note: str = ""
+
+@app.get("/trades/{trade_id}/candles")
+def get_candles_for_trade(trade_id: str):
+    candles = get_trade_candles(trade_id)
+    if candles is None:
+        raise HTTPException(status_code=404, detail="Geen candle snapshot beschikbaar")
+    return {"candles": candles}
+
+@app.post("/trades/{trade_id}/review")
+def post_review(trade_id: str, req: ReviewRequest):
+    valid = {"good_entry", "too_early", "wrong_setup", "bad_rr", "false_signal"}
+    if req.label not in valid:
+        raise HTTPException(status_code=400, detail=f"Ongeldig label. Kies uit: {valid}")
+    save_review(trade_id, req.label, req.note)
+    return {"message": "Review opgeslagen", "trade_id": trade_id, "label": req.label}
+
+@app.get("/reviews/summary")
+def get_reviews_summary():
+    rows = load_reviews_summary()
+    return {"reviews": rows, "total": len(rows)}
 
 
 # ── Backtest endpoints ────────────────────────────────────────────────────────
