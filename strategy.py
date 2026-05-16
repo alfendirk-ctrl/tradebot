@@ -286,8 +286,8 @@ def check_liquidity_sweep(candles, key_levels: list[Level], structure: str) -> O
     body  = abs(close - open_)
     atr   = calc_atr(candles, 14)
 
-    # Minimale wickgrootte: 0.5× ATR zodat kleine wicks worden genegeerd
-    min_wick = atr * 0.5
+    # Minimale wickgrootte: 0.35× ATR zodat kleine wicks worden genegeerd
+    min_wick = atr * 0.35
 
     for level in sorted(key_levels, key=lambda l: -l.strength):
         lp = level.price
@@ -631,15 +631,6 @@ def analyze(candles_15m: list, candles_1h: list, cooldown_candles: int = 0,
     )
 
     if signal:
-        # 4h macro-bias filter: verwerp signals die tegen de 4h trend ingaan
-        if structure_4h and structure_4h != 'ranging':
-            if structure_4h == 'uptrend' and signal.side == 'sell':
-                logger.info(f"Signal afgewezen: {signal.setup_type} SHORT tegen 4h uptrend")
-                return None
-            if structure_4h == 'downtrend' and signal.side == 'buy':
-                logger.info(f"Signal afgewezen: {signal.setup_type} LONG tegen 4h downtrend")
-                return None
-
         atr = calc_atr(candles_15m, 14)
 
         # SL minimaal 1.5× ATR van entry
@@ -663,7 +654,7 @@ def analyze(candles_15m: list, candles_1h: list, cooldown_candles: int = 0,
         risk   = abs(signal.entry - signal.stop_loss)
         reward = abs(signal.tp3 - signal.entry)
         rr = reward / risk if risk > 0 else 0
-        if rr < 2.5:
+        if rr < 2.0:
             logger.info(f"Signal afgewezen: R:R te laag ({rr:.1f})")
             return None
 
