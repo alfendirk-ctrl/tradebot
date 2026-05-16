@@ -689,6 +689,233 @@ function CandleChart({ candles, entry, sl, tp1, tp2, tp3, side }) {
   );
 }
 
+// ─── Trade Review Panel ───────────────────────────────────────────────────────
+
+const REVIEW_LABELS = [
+  { key: "good_entry",    emoji: "✅", label: "Goede entry",      color: C.green  },
+  { key: "too_early",     emoji: "⚠️", label: "Te vroeg",         color: C.yellow },
+  { key: "wrong_setup",   emoji: "❌", label: "Verkeerde setup",   color: C.red    },
+  { key: "bad_rr",        emoji: "📊", label: "Slechte R:R",      color: C.orange },
+  { key: "false_signal",  emoji: "🚫", label: "Vals signaal",     color: C.muted  },
+];
+
+function TradeReviewModal({ trade, onClose, onSaved }) {
+  const [candles, setCandles] = useState(null);
+  const [loadingC, setLoadingC] = useState(true);
+  const [selected, setSelected] = useState(trade.review_label || null);
+  const [note, setNote] = useState(trade.review_note || "");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    setLoadingC(true);
+    fetch(`${API_URL}/trades/${trade.id}/candles`)
+      .then(r => r.ok ? r.json() : null)
+      .then(data => { setCandles(data?.candles || []); setLoadingC(false); })
+      .catch(() => { setCandles([]); setLoadingC(false); });
+  }, [trade.id]);
+
+  async function saveReview() {
+    if (!selected) return;
+    setSaving(true);
+    await fetch(`${API_URL}/trades/${trade.id}/review`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ label: selected, note }),
+    });
+    setSaving(false);
+    onSaved(trade.id, selected, note);
+    onClose();
+  }
+
+  const isLong = trade.side === "buy";
+  const pnlPos = trade.realized_pnl >= 0;
+
+  return (
+    <div style={{
+      position: "fixed", inset: 0, background: "rgba(0,0,0,0.65)", zIndex: 1000,
+      display: "flex", alignItems: "center", justifyContent: "center", padding: 20,
+    }} onClick={onClose}>
+      <div style={{
+        background: C.card, borderRadius: 16, padding: 24, maxWidth: 620, width: "100%",
+        boxShadow: "0 20px 60px rgba(0,0,0,0.3)", maxHeight: "90vh", overflowY: "auto",
+      }} onClick={e => e.stopPropagation()}>
+
+        {/* Header */}
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
+          <div>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 4 }}>
+              <span style={{ fontSize: 14, fontWeight: 800, color: isLong ? C.green : C.red }}>
+                {isLong ? "▲ LONG" : "▼ SHORT"}
+              </span>
+              <Tag color={C.blue} bg={C.blueBg}>{trade.setup_type?.replace("_", " ")}</Tag>
+              <span style={{ fontSize: 11, color: pnlPos ? C.green : C.red, fontWeight: 700 }}>
+                {pnlPos ? "+" : ""}{fmt(trade.realized_pnl)} USDT
+              </span>
+            </div>
+            <div style={{ fontSize: 10, color: C.muted }}>
+              Entry {fmtP(trade.entry_price)} → Exit {fmtP(trade.exit_price)} · {trade.timestamp?.slice(0, 10)}
+            </div>
+          </div>
+          <button onClick={onClose} style={{ background: "none", border: "none", fontSize: 18, cursor: "pointer", color: C.muted, lineHeight: 1 }}>✕</button>
+        </div>
+
+        {/* Candle chart */}
+        <div style={{ marginBottom: 18 }}>
+          {loadingC
+            ? <div style={{ height: 120, display: "flex", alignItems: "center", justifyContent: "center", color: C.muted, fontSize: 11 }}>Candles laden…</div>
+            : <CandleChart candles={candles} entry={trade.entry_price} sl={trade.stop_loss} tp1={trade.tp1} tp2={trade.tp2} tp3={trade.tp3} side={trade.side} />
+          }
+        </div>
+
+        {/* TP progress */}
+        <div style={{ display: "flex", gap: 6, marginBottom: 18 }}>
+          <TpProgress trade={trade} />
+        </div>
+
+        {/* Label buttons */}
+        <div style={{ fontSize: 10, color: C.muted, letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>Beoordeling</div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 16 }}>
+          {REVIEW_LABELS.map(l => (
+            <button key={l.key} onClick={() => setSelected(l.key)} style={{
+              padding: "8px 14px", borderRadius: 8, fontSize: 11, fontWeight: 700, cursor: "pointer",
+              border: `2px solid ${selected === l.key ? l.color : C.border}`,
+              background: selected === l.key ? l.color + "18" : "#fafbfd",
+              color: selected === l.key ? l.color : C.muted,
+              transition: "all 0.15s",
+            }}>
+              {l.emoji} {l.label}
+            </button>
+          ))}
+        </div>
+
+        {/* Note */}
+        <textarea
+          placeholder="Optionele notitie (wat zag je? wat ging goed/fout?)"
+          value={note}
+          onChange={e => setNote(e.target.value)}
+          style={{
+            width: "100%", minHeight: 64, padding: "8px 12px", borderRadius: 8,
+            border: `1px solid ${C.border}`, background: "#fafbfd", color: C.text,
+            fontFamily: "inherit", fontSize: 11, resize: "vertical", marginBottom: 14, boxSizing: "border-box",
+          }}
+        />
+
+        {/* Save */}
+        <button className="btn-primary" onClick={saveReview} disabled={!selected || saving}>
+          {saving ? "Opslaan…" : "Opslaan"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function TradeReviewPanel({ closedTrades }) {
+  const [reviewTrade, setReviewTrade] = useState(null);
+  const [reviews, setReviews] = useState({});  // trade_id → { label, note }
+
+  // Load existing reviews from the trades list
+  useEffect(() => {
+    const existing = {};
+    closedTrades.forEach(t => {
+      if (t.review_label) existing[t.id] = { label: t.review_label, note: t.review_note || "" };
+    });
+    setReviews(existing);
+  }, [closedTrades]);
+
+  function handleSaved(id, label, note) {
+    setReviews(prev => ({ ...prev, [id]: { label, note } }));
+  }
+
+  const pending   = closedTrades.filter(t => !reviews[t.id]);
+  const done      = closedTrades.filter(t =>  reviews[t.id]);
+
+  // Summary: per label, count and win/loss
+  const summary = {};
+  done.forEach(t => {
+    const lbl = reviews[t.id]?.label;
+    if (!lbl) return;
+    if (!summary[lbl]) summary[lbl] = { total: 0, wins: 0 };
+    summary[lbl].total++;
+    if (t.realized_pnl > 0) summary[lbl].wins++;
+  });
+
+  return (
+    <div style={{ background: C.card, borderRadius: 14, padding: 20, boxShadow: C.shadow, marginBottom: 20 }}>
+      <SectionLabel badge={pending.length}>Trade Review{pending.length > 0 ? ` — ${pending.length} te beoordelen` : ""}</SectionLabel>
+
+      {closedTrades.length === 0 && (
+        <EmptyState icon="🔍" text="Nog geen gesloten trades om te beoordelen" height={80} />
+      )}
+
+      {/* Label summary */}
+      {done.length > 0 && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 18 }}>
+          {REVIEW_LABELS.map(l => {
+            const s = summary[l.key];
+            if (!s) return null;
+            const wr = Math.round(s.wins / s.total * 100);
+            return (
+              <div key={l.key} style={{
+                background: l.color + "12", border: `1px solid ${l.color}33`,
+                borderRadius: 10, padding: "8px 12px", fontSize: 10,
+              }}>
+                <div style={{ fontWeight: 700, color: l.color, marginBottom: 2 }}>{l.emoji} {l.label}</div>
+                <div style={{ color: C.muted }}>{s.total} trades · {wr}% win</div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Trade list */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        {[...closedTrades].reverse().map(t => {
+          const rv = reviews[t.id];
+          const lbl = rv ? REVIEW_LABELS.find(l => l.key === rv.label) : null;
+          const pnlPos = t.realized_pnl >= 0;
+          return (
+            <div key={t.id} style={{
+              display: "flex", alignItems: "center", gap: 10,
+              padding: "10px 14px", borderRadius: 10,
+              background: rv ? "#fafbfd" : "#fffdf5",
+              border: `1px solid ${rv ? C.border : C.yellow + "44"}`,
+            }}>
+              <span style={{ fontSize: 11, fontWeight: 700, color: t.side === "buy" ? C.green : C.red, minWidth: 22 }}>
+                {t.side === "buy" ? "▲" : "▼"}
+              </span>
+              <Tag color={C.blue} bg={C.blueBg}>{t.setup_type?.replace("_", " ")}</Tag>
+              <span style={{ fontSize: 10, color: C.muted, flex: 1 }}>{t.timestamp?.slice(0, 16).replace("T", " ")}</span>
+              <span style={{ fontSize: 11, fontWeight: 700, color: pnlPos ? C.green : C.red, minWidth: 70, textAlign: "right" }}>
+                {pnlPos ? "+" : ""}{fmt(t.realized_pnl)} USDT
+              </span>
+              {lbl ? (
+                <span style={{ fontSize: 10, color: lbl.color, fontWeight: 600, minWidth: 100 }}>{lbl.emoji} {lbl.label}</span>
+              ) : (
+                <span style={{ fontSize: 10, color: C.dim, minWidth: 100 }}>niet beoordeeld</span>
+              )}
+              <button onClick={() => setReviewTrade(t)} style={{
+                padding: "5px 12px", borderRadius: 6, fontSize: 10, fontWeight: 700, cursor: "pointer",
+                background: rv ? C.border : C.blueBg, color: rv ? C.muted : C.blue,
+                border: `1px solid ${rv ? C.border : C.blue + "44"}`,
+              }}>
+                {rv ? "Bewerk" : "Beoordeel"}
+              </button>
+            </div>
+          );
+        })}
+      </div>
+
+      {reviewTrade && (
+        <TradeReviewModal
+          trade={reviewTrade}
+          onClose={() => setReviewTrade(null)}
+          onSaved={handleSaved}
+        />
+      )}
+    </div>
+  );
+}
+
 // ─── Backtest Panel ───────────────────────────────────────────────────────────
 
 function BacktestPanel() {
@@ -1211,6 +1438,9 @@ export default function Dashboard() {
 
       {/* ── Monte Carlo ────────────────────────────────────────────────────── */}
       <MonteCarloPanel />
+
+      {/* ── Trade Review ────────────────────────────────────────────────────── */}
+      <TradeReviewPanel closedTrades={closedTrades} />
 
       {/* ── Closed trades ──────────────────────────────────────────────────── */}
       <SectionLabel badge={closedTrades.length}>Gesloten trades</SectionLabel>
