@@ -25,6 +25,24 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# ─── Volume helpers ───────────────────────────────────────────────────────────
+
+def avg_volume(candles: list, n: int = 20) -> float:
+    """Gemiddeld volume over de laatste n candles (exclusief huidige)."""
+    vols = [c[5] for c in candles[-(n + 1):-1] if c[5] > 0]
+    return sum(vols) / len(vols) if vols else 0.0
+
+def vol_confirm(candles: list, factor: float = 1.3, n: int = 20) -> bool:
+    """True als het volume van de laatste candle >= factor × gemiddelde."""
+    avg = avg_volume(candles, n)
+    return avg == 0 or candles[-1][5] >= avg * factor
+
+def vol_weak(candles: list, factor: float = 1.0, n: int = 20) -> bool:
+    """True als het volume van de laatste candle < factor × gemiddelde (zwakke pullback)."""
+    avg = avg_volume(candles, n)
+    return avg == 0 or candles[-1][5] < avg * factor
+
+
 # ─── Session Filter ────────────────────────────────────────────────────────────
 
 SESSIONS = {
@@ -285,7 +303,7 @@ def check_liquidity_sweep(candles, key_levels: list[Level], structure: str) -> O
             wick_significant = lower_wick > max(body * 1.5, min_wick)
             bullish_close = close > open_
 
-            if swept_below and closed_above and wick_significant and bullish_close:
+            if swept_below and closed_above and wick_significant and bullish_close and vol_confirm(candles):
                 sl = low * 0.9985              # net onder sweep-laagste punt
                 if close - sl < atr * 0.3:     # te kleine SL → skip
                     continue
@@ -305,7 +323,7 @@ def check_liquidity_sweep(candles, key_levels: list[Level], structure: str) -> O
             wick_significant = upper_wick > max(body * 1.5, min_wick)
             bearish_close = close < open_
 
-            if swept_above and closed_below and wick_significant and bearish_close:
+            if swept_above and closed_below and wick_significant and bearish_close and vol_confirm(candles):
                 sl = high * 1.0015             # net boven sweep-hoogste punt
                 if sl - close < atr * 0.3:
                     continue
@@ -342,7 +360,7 @@ def check_breakout(candles, key_levels: list[Level], structure: str) -> Optional
         # Bullish breakout
         if (structure in ('uptrend', 'ranging') and
                 prev[4] < lp and close > lp * 1.002):
-            if near_level(low, lp, 0.008) and confirmation_candle(candles, 'bullish'):
+            if near_level(low, lp, 0.008) and confirmation_candle(candles, 'bullish') and vol_confirm(candles):
                 sl = low - (close - low) * 0.3
                 tp1, tp2, tp3 = find_tp_levels(close, 'buy', key_levels, candles)
                 return Signal(
@@ -355,7 +373,7 @@ def check_breakout(candles, key_levels: list[Level], structure: str) -> Optional
         # Bearish breakout
         if (structure in ('downtrend', 'ranging') and
                 prev[4] > lp and close < lp * 0.998):
-            if near_level(high, lp, 0.008) and confirmation_candle(candles, 'bearish'):
+            if near_level(high, lp, 0.008) and confirmation_candle(candles, 'bearish') and vol_confirm(candles):
                 sl = high + (high - close) * 0.3
                 tp1, tp2, tp3 = find_tp_levels(close, 'sell', key_levels, candles)
                 return Signal(
@@ -450,6 +468,7 @@ def check_continuation(candles, key_levels: list[Level], structure: str) -> Opti
                 near_level(close, lp, 0.006) and
                 close > open_ and                          # bullish candle
                 confirmation_candle(candles, 'bullish') and
+                vol_weak(candles) and                      # pullback op laag volume
                 level.strength >= 1):
             sl = low - abs(close - lp) * 0.6
             if close - sl <= 0 or close - sl < (close * 0.003):  # min SL afstand 0.3%
@@ -471,6 +490,7 @@ def check_continuation(candles, key_levels: list[Level], structure: str) -> Opti
                 near_level(close, lp, 0.006) and
                 close < open_ and                          # bearish candle
                 confirmation_candle(candles, 'bearish') and
+                vol_weak(candles) and                      # pullback op laag volume
                 level.strength >= 1):
             sl = high + abs(lp - close) * 0.6
             if sl - close <= 0 or sl - close < (close * 0.003):
@@ -521,7 +541,7 @@ def check_rotation(candles, structure: str) -> Optional[Signal]:
     rejection_bear = (is_rejection_candle(candles[-1], 'bearish') or
                       is_engulfing(candles, 'bearish'))
 
-    if structure_break_bear and rejection_bear:
+    if structure_break_bear and rejection_bear and vol_confirm(candles, factor=1.2):
         sl = high + abs(high - close) * 0.3
         if sl - close > 0:
             tp1, tp2, tp3 = find_tp_levels(close, 'sell', key_levels_temp, candles)
@@ -537,7 +557,7 @@ def check_rotation(candles, structure: str) -> Optional[Signal]:
     rejection_bull = (is_rejection_candle(candles[-1], 'bullish') or
                       is_engulfing(candles, 'bullish'))
 
-    if structure_break_bull and rejection_bull:
+    if structure_break_bull and rejection_bull and vol_confirm(candles, factor=1.2):
         sl = low - abs(close - low) * 0.3
         if close - sl > 0:
             tp1, tp2, tp3 = find_tp_levels(close, 'buy', key_levels_temp, candles)
