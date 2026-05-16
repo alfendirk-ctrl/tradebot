@@ -523,6 +523,7 @@ def run_bot():
                         candles_15m, candles_1h,
                         candles_4h=candles_4h,
                         disabled_setups=state.disabled_setups,
+                        session_filter=False,
                     )
 
                     # Signal expiry check: als entry >0.5% van huidige prijs afwijkt, verwerp
