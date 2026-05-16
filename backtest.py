@@ -132,6 +132,35 @@ monte_carlo_state = MonteCarloState()
 
 # ─── Helpers ───────────────────────────────────────────────────────────────────
 
+def fetch_ohlcv_paginated(exchange, symbol: str, timeframe: str, days: int, per_page: int = 300) -> list:
+    """Haal historische candles op in meerdere requests (OKX cap = 300 per request)."""
+    tf_minutes = {'1m': 1, '5m': 5, '15m': 15, '30m': 30, '1h': 60, '4h': 240, '1d': 1440}
+    tf_ms      = tf_minutes.get(timeframe, 15) * 60 * 1000
+
+    now_ms    = int(time.time() * 1000)
+    since_ms  = now_ms - days * 24 * 60 * 60 * 1000
+
+    all_candles: list = []
+    current_since = since_ms
+
+    while True:
+        batch = exchange.fetch_ohlcv(symbol, timeframe, since=current_since, limit=per_page)
+        if not batch:
+            break
+        all_candles.extend(batch)
+        if len(batch) < per_page or batch[-1][0] >= now_ms:
+            break
+        current_since = batch[-1][0] + tf_ms
+
+    # Dedupliceer en sorteer op timestamp
+    seen, unique = set(), []
+    for c in all_candles:
+        if c[0] not in seen:
+            seen.add(c[0])
+            unique.append(c)
+    return sorted(unique, key=lambda c: c[0])
+
+
 def resample_candles(candles_15m: list, factor: int) -> list:
     """Resample 15m → hogere timeframe. factor=4 → 1h, factor=16 → 4h."""
     result = []
@@ -409,7 +438,7 @@ def run_backtest(config: BacktestConfig, exchange) -> BacktestResult:
     logger.info(f"Backtest: {config.symbol} | {config.days}d | {limit_15m} candles ophalen...")
     backtest_state.progress = 0.05
 
-    candles_15m = exchange.fetch_ohlcv(config.symbol, '15m', limit=limit_15m)
+    candles_15m = fetch_ohlcv_paginated(exchange, config.symbol, '15m', config.days)
     if len(candles_15m) < 200:
         raise ValueError(f"Te weinig candles ontvangen: {len(candles_15m)}")
 
