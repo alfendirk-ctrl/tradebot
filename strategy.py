@@ -245,19 +245,17 @@ def find_tp_levels(entry: float, side: str, key_levels: list[Level], candles) ->
     atr = sum(abs(c[2] - c[3]) for c in candles[-14:]) / 14
 
     if side == 'buy':
-        # Levels boven entry, gesorteerd van dichtbij naar ver
         candidates = sorted(
-            [l.price for l in key_levels if l.price > entry * 1.002],
+            [l.price for l in key_levels if l.price > entry * 1.001],
         )
-        # Fallback levels op ATR-basis
-        fallbacks = [entry + atr * 2, entry + atr * 3.5, entry + atr * 5.5]
+        # TP1 dichterbij (1× ATR), TP2/3 verder
+        fallbacks = [entry + atr * 1.0, entry + atr * 2.5, entry + atr * 4.0]
     else:
-        # Levels onder entry, gesorteerd van dichtbij naar ver
         candidates = sorted(
-            [l.price for l in key_levels if l.price < entry * 0.998],
+            [l.price for l in key_levels if l.price < entry * 0.999],
             reverse=True
         )
-        fallbacks = [entry - atr * 2, entry - atr * 3.5, entry - atr * 5.5]
+        fallbacks = [entry - atr * 1.0, entry - atr * 2.5, entry - atr * 4.0]
 
     # Vul aan met fallbacks als er te weinig levels zijn
     while len(candidates) < 3:
@@ -296,7 +294,7 @@ def check_liquidity_sweep(candles, key_levels: list[Level], structure: str) -> O
         lp = level.price
 
         # ── Bullish sweep: wick onder support, sluit terug erboven ────────────
-        if structure in ('uptrend', 'ranging'):
+        if structure == 'uptrend':
             lower_wick = min(open_, close) - low
             swept_below = low < lp * 0.9995   # wick gaat door het level
             closed_above = close > lp          # maar sluit erboven
@@ -304,8 +302,8 @@ def check_liquidity_sweep(candles, key_levels: list[Level], structure: str) -> O
             bullish_close = close > open_
 
             if swept_below and closed_above and wick_significant and bullish_close:
-                sl = low * 0.9985              # net onder sweep-laagste punt
-                if close - sl < atr * 0.3:     # te kleine SL → skip
+                sl = low * 0.997               # ruimere buffer onder sweep-wick
+                if close - sl < atr * 0.3:
                     continue
                 tp1, tp2, tp3 = find_tp_levels(close, 'buy', key_levels, candles)
                 return Signal(
@@ -316,7 +314,7 @@ def check_liquidity_sweep(candles, key_levels: list[Level], structure: str) -> O
                 )
 
         # ── Bearish sweep: wick boven resistance, sluit terug eronder ─────────
-        if structure in ('downtrend', 'ranging'):
+        if structure == 'downtrend':
             upper_wick = high - max(open_, close)
             swept_above  = high > lp * 1.0005  # wick gaat door het level
             closed_below = close < lp           # maar sluit eronder
@@ -324,7 +322,7 @@ def check_liquidity_sweep(candles, key_levels: list[Level], structure: str) -> O
             bearish_close = close < open_
 
             if swept_above and closed_below and wick_significant and bearish_close:
-                sl = high * 1.0015             # net boven sweep-hoogste punt
+                sl = high * 1.003              # ruimere buffer boven sweep-wick
                 if sl - close < atr * 0.3:
                     continue
                 tp1, tp2, tp3 = find_tp_levels(close, 'sell', key_levels, candles)
@@ -358,7 +356,7 @@ def check_breakout(candles, key_levels: list[Level], structure: str) -> Optional
         lp = level.price
 
         # Bullish breakout
-        if (structure in ('uptrend', 'ranging') and
+        if (structure == 'uptrend' and
                 prev[4] < lp and close > lp * 1.002):
             if near_level(low, lp, 0.008) and confirmation_candle(candles, 'bullish'):
                 sl = low - (close - low) * 0.3
@@ -371,7 +369,7 @@ def check_breakout(candles, key_levels: list[Level], structure: str) -> Optional
                 )
 
         # Bearish breakout
-        if (structure in ('downtrend', 'ranging') and
+        if (structure == 'downtrend' and
                 prev[4] > lp and close < lp * 0.998):
             if near_level(high, lp, 0.008) and confirmation_candle(candles, 'bearish'):
                 sl = high + (high - close) * 0.3
@@ -540,7 +538,7 @@ def check_rotation(candles, structure: str) -> Optional[Signal]:
                       is_engulfing(candles, 'bearish'))
 
     if structure_break_bear and rejection_bear:
-        sl = high + abs(high - close) * 0.3
+        sl = high + abs(high - close) * 0.6
         if sl - close > 0:
             tp1, tp2, tp3 = find_tp_levels(close, 'sell', key_levels_temp, candles)
             return Signal(
@@ -556,7 +554,7 @@ def check_rotation(candles, structure: str) -> Optional[Signal]:
                       is_engulfing(candles, 'bullish'))
 
     if structure_break_bull and rejection_bull:
-        sl = low - abs(close - low) * 0.3
+        sl = low - abs(close - low) * 0.6
         if close - sl > 0:
             tp1, tp2, tp3 = find_tp_levels(close, 'buy', key_levels_temp, candles)
             return Signal(
