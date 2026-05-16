@@ -32,12 +32,12 @@ def avg_volume(candles: list, n: int = 20) -> float:
     vols = [c[5] for c in candles[-(n + 1):-1] if c[5] > 0]
     return sum(vols) / len(vols) if vols else 0.0
 
-def vol_confirm(candles: list, factor: float = 1.3, n: int = 20) -> bool:
+def vol_confirm(candles: list, factor: float = 1.1, n: int = 20) -> bool:
     """True als het volume van de laatste candle >= factor × gemiddelde."""
     avg = avg_volume(candles, n)
     return avg == 0 or candles[-1][5] >= avg * factor
 
-def vol_weak(candles: list, factor: float = 1.0, n: int = 20) -> bool:
+def vol_weak(candles: list, factor: float = 1.2, n: int = 20) -> bool:
     """True als het volume van de laatste candle < factor × gemiddelde (zwakke pullback)."""
     avg = avg_volume(candles, n)
     return avg == 0 or candles[-1][5] < avg * factor
