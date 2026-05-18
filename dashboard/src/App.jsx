@@ -1354,7 +1354,6 @@ export default function Dashboard() {
           {status?.daily_loss_pct < -1 && (
             <Tag color={C.yellow} bg={C.yellowBg}>DAY {fmt(status.daily_loss_pct, 1)}%</Tag>
           )}
-          <SessionIndicator />
           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
             <div className={isRunning ? "pulse" : ""} style={{
               width: 8, height: 8, borderRadius: "50%",
