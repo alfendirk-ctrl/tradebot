@@ -356,16 +356,6 @@ function ActiveTradeCard({ trade }) {
         </div>
       </div>
 
-      {(trade.session || trade.valid_until) && (
-        <div style={{ display: "flex", justifyContent: "space-between", marginTop: 10, paddingTop: 10, borderTop: `1px solid ${C.border}` }}>
-          {trade.session && trade.session !== 'unknown' && (
-            <Tag color={C.blue} bg={C.blueBg}>⏱ {trade.session.replace("_", " ")}</Tag>
-          )}
-          {trade.valid_until && (
-            <span style={{ fontSize: 9, color: C.muted }}>geldig tot {trade.valid_until?.slice(11, 16)} UTC</span>
-          )}
-        </div>
-      )}
       {trade.reason && (
         <div style={{ marginTop: 8, fontSize: 10, color: C.dim, fontStyle: "italic" }}>{trade.reason}</div>
       )}
