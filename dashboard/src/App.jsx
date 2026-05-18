@@ -874,32 +874,35 @@ function TradeReviewPanel({ closedTrades }) {
           const lbl = rv ? REVIEW_LABELS.find(l => l.key === rv.label) : null;
           const pnlPos = t.realized_pnl >= 0;
           return (
-            <div key={t.id} style={{
+            <div key={t.id} onClick={() => setReviewTrade(t)} style={{
               display: "flex", alignItems: "center", gap: 10,
-              padding: "10px 14px", borderRadius: 10,
+              padding: "14px 16px", borderRadius: 10, cursor: "pointer",
               background: rv ? "#fafbfd" : "#fffdf5",
               border: `1px solid ${rv ? C.border : C.yellow + "44"}`,
+              WebkitTapHighlightColor: "transparent",
             }}>
-              <span style={{ fontSize: 11, fontWeight: 700, color: t.side === "buy" ? C.green : C.red, minWidth: 22 }}>
+              <span style={{ fontSize: 13, fontWeight: 700, color: t.side === "buy" ? C.green : C.red }}>
                 {t.side === "buy" ? "▲" : "▼"}
               </span>
-              <Tag color={C.blue} bg={C.blueBg}>{t.setup_type?.replace("_", " ")}</Tag>
-              <span style={{ fontSize: 10, color: C.muted, flex: 1 }}>{t.timestamp?.slice(0, 16).replace("T", " ")}</span>
-              <span style={{ fontSize: 11, fontWeight: 700, color: pnlPos ? C.green : C.red, minWidth: 70, textAlign: "right" }}>
-                {pnlPos ? "+" : ""}{fmt(t.realized_pnl)} USDT
-              </span>
-              {lbl ? (
-                <span style={{ fontSize: 10, color: lbl.color, fontWeight: 600, minWidth: 100 }}>{lbl.emoji} {lbl.label}</span>
-              ) : (
-                <span style={{ fontSize: 10, color: C.dim, minWidth: 100 }}>niet beoordeeld</span>
-              )}
-              <button onClick={() => setReviewTrade(t)} style={{
-                padding: "5px 12px", borderRadius: 6, fontSize: 10, fontWeight: 700, cursor: "pointer",
-                background: rv ? C.border : C.blueBg, color: rv ? C.muted : C.blue,
-                border: `1px solid ${rv ? C.border : C.blue + "44"}`,
-              }}>
-                {rv ? "Bewerk" : "Beoordeel"}
-              </button>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 3 }}>
+                  <Tag color={C.blue} bg={C.blueBg}>{t.setup_type?.replace("_", " ")}</Tag>
+                  <span style={{ fontSize: 11, fontWeight: 700, color: pnlPos ? C.green : C.red }}>
+                    {pnlPos ? "+" : ""}{fmt(t.realized_pnl)} USDT
+                  </span>
+                </div>
+                <div style={{ fontSize: 10, color: C.muted }}>{t.timestamp?.slice(0, 16).replace("T", " ")}</div>
+              </div>
+              <div style={{ textAlign: "right", flexShrink: 0 }}>
+                {lbl ? (
+                  <span style={{ fontSize: 11, color: lbl.color, fontWeight: 700 }}>{lbl.emoji} {lbl.label}</span>
+                ) : (
+                  <span style={{
+                    fontSize: 10, padding: "4px 10px", borderRadius: 6, fontWeight: 700,
+                    background: C.blueBg, color: C.blue, border: `1px solid ${C.blue}33`,
+                  }}>Beoordeel →</span>
+                )}
+              </div>
             </div>
           );
         })}
