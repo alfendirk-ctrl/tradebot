@@ -516,6 +516,7 @@ def run_bot():
                 _check_open_trades_live(exchange)
 
             # ── Marktdata ─────────────────────────────────────────────────────
+            candles_5m  = get_candles(exchange, state.symbol, '5m',  limit=60)
             candles_15m = get_candles(exchange, state.symbol, '15m', limit=100)
             candles_1h  = get_candles(exchange, state.symbol, '1h',  limit=50)
             candles_4h  = get_candles(exchange, state.symbol, '4h',  limit=30)
@@ -530,6 +531,7 @@ def run_bot():
                     signal = analyze(
                         candles_15m, candles_1h,
                         candles_4h=candles_4h,
+                        candles_5m=candles_5m,
                         disabled_setups=state.disabled_setups,
                         session_filter=False,
                     )

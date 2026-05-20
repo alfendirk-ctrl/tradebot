@@ -264,13 +264,41 @@ def find_tp_levels(entry: float, side: str, key_levels: list[Level], candles) ->
 
 # ─── 5 Setup Detectors ────────────────────────────────────────────────────────
 
-def check_liquidity_sweep(candles, key_levels: list[Level], structure: str) -> Optional[Signal]:
+def _refine_sl_with_5m(candles_5m: list, level_price: float, side: str) -> Optional[float]:
+    """
+    Zoek in de laatste 3 5m-candles de sweep-candle die het 15m-signaal veroorzaakte.
+    Geeft de tightere 5m-SL terug als die gevonden wordt, anders None.
+    Een 15m-candle = 3 5m-candles; dezelfde wick zit daarin maar compacter.
+    """
+    if not candles_5m or len(candles_5m) < 3:
+        return None
+    for candle in reversed(candles_5m[-3:]):
+        open_, high, low, close = candle[1], candle[2], candle[3], candle[4]
+        body = abs(close - open_)
+        if body == 0:
+            continue
+        if side == 'buy':
+            lower_wick = min(open_, close) - low
+            if (low < level_price * 0.9998 and close > level_price and
+                    lower_wick > body * 1.2 and close > open_):
+                return low * 0.9990  # tighter dan 15m SL
+        else:
+            upper_wick = high - max(open_, close)
+            if (high > level_price * 1.0002 and close < level_price and
+                    upper_wick > body * 1.2 and close < open_):
+                return high * 1.0010
+    return None
+
+
+def check_liquidity_sweep(candles, key_levels: list[Level], structure: str,
+                           candles_5m: list = None) -> Optional[Signal]:
     """
     Liquidity Sweep setup:
     - Wick steekt voorbij een key level (jaagt stops na)
     - Candle sluit terug aan de andere kant van het level (fake-out bevestigd)
     - Wick is minimaal 1.5× de body
     - SL net voorbij de sweepwick, entry op close
+    - candles_5m: optioneel — als opgegeven wordt SL verfijnd op 5m wick (tighter = betere R:R)
 
     Verschil met breakout: bij breakout verwacht je dat prijs doorloopt.
     Bij een sweep verwacht je dat prijs keert — de doorbraak was een val.
@@ -302,14 +330,19 @@ def check_liquidity_sweep(candles, key_levels: list[Level], structure: str) -> O
 
             if swept_below and closed_above and wick_significant and bullish_close:
                 sl = low * 0.9985
+                # Probeer tightere 5m SL — verbetert R:R zonder signal te verwerpen
+                sl_5m = _refine_sl_with_5m(candles_5m, lp, 'buy')
+                if sl_5m and sl_5m > sl:  # alleen gebruiken als het tighter is
+                    sl = sl_5m
                 if close - sl < atr * 0.3:
                     continue
                 tp1, tp2, tp3 = find_tp_levels(close, 'buy', key_levels, candles)
+                refined = "5m" if sl_5m else "15m"
                 return Signal(
                     setup_type='liquidity_sweep', side='buy',
                     entry=close, stop_loss=sl, tp1=tp1, tp2=tp2, tp3=tp3,
-                    reason=f"Bullish sweep onder {lp:.0f} (wick {lower_wick:.0f}, strength={level.strength})",
-                    confidence=min(0.76 + level.strength * 0.04, 0.95),
+                    reason=f"Bullish sweep onder {lp:.0f} (wick {lower_wick:.0f}, SL={refined}, strength={level.strength})",
+                    confidence=min(0.76 + level.strength * 0.04 + (0.05 if sl_5m else 0), 0.95),
                 )
 
         # ── Bearish sweep: wick boven resistance, sluit terug eronder ─────────
@@ -322,14 +355,18 @@ def check_liquidity_sweep(candles, key_levels: list[Level], structure: str) -> O
 
             if swept_above and closed_below and wick_significant and bearish_close:
                 sl = high * 1.0015
+                sl_5m = _refine_sl_with_5m(candles_5m, lp, 'sell')
+                if sl_5m and sl_5m < sl:  # alleen gebruiken als het tighter is
+                    sl = sl_5m
                 if sl - close < atr * 0.3:
                     continue
                 tp1, tp2, tp3 = find_tp_levels(close, 'sell', key_levels, candles)
+                refined = "5m" if sl_5m else "15m"
                 return Signal(
                     setup_type='liquidity_sweep', side='sell',
                     entry=close, stop_loss=sl, tp1=tp1, tp2=tp2, tp3=tp3,
-                    reason=f"Bearish sweep boven {lp:.0f} (wick {upper_wick:.0f}, strength={level.strength})",
-                    confidence=min(0.76 + level.strength * 0.04, 0.95),
+                    reason=f"Bearish sweep boven {lp:.0f} (wick {upper_wick:.0f}, SL={refined}, strength={level.strength})",
+                    confidence=min(0.76 + level.strength * 0.04 + (0.05 if sl_5m else 0), 0.95),
                 )
 
     return None
@@ -574,7 +611,8 @@ def calc_atr(candles: list, period: int = 14) -> float:
 # ─── Main Analyzer ────────────────────────────────────────────────────────────
 
 def analyze(candles_15m: list, candles_1h: list, cooldown_candles: int = 0,
-            candles_4h: list = None, session_filter: bool = True,
+            candles_4h: list = None, candles_5m: list = None,
+            session_filter: bool = True,
             disabled_setups: list = None) -> Optional[Signal]:
     """
     Analyseer de markt op alle 4 DoopieCash setups.
@@ -626,7 +664,7 @@ def analyze(candles_15m: list, candles_1h: list, cooldown_candles: int = 0,
         logger.info(f"Uitgeschakelde setups: {', '.join(off)}")
 
     signal = (
-        (check_liquidity_sweep(candles_15m, all_levels, structure_1h) if 'liquidity_sweep' not in off else None) or
+        (check_liquidity_sweep(candles_15m, all_levels, structure_1h, candles_5m) if 'liquidity_sweep' not in off else None) or
         (check_rotation(candles_15m, structure_1h) if 'rotation' not in off else None) or
         (check_breakout(candles_15m, all_levels, structure_1h) if 'breakout' not in off else None) or
         (check_continuation(candles_15m, all_levels, structure_1h) if 'continuation' not in off else None)
