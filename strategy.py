@@ -264,6 +264,23 @@ def find_tp_levels(entry: float, side: str, key_levels: list[Level], candles) ->
 
 # ─── 5 Setup Detectors ────────────────────────────────────────────────────────
 
+def _refine_sl_5m(candles_5m: list, side: str) -> Optional[float]:
+    """
+    Algemene 5m SL-verfijning voor alle setups.
+    Zoekt de laatste bevestigingscandle in de afgelopen 3 5m-candles
+    en geeft de low (buy) of high (sell) terug als tightere SL.
+    """
+    if not candles_5m or len(candles_5m) < 3:
+        return None
+    for candle in reversed(candles_5m[-3:]):
+        open_, high, low, close = candle[1], candle[2], candle[3], candle[4]
+        if side == 'buy' and close > open_:
+            return low * 0.9992
+        elif side == 'sell' and close < open_:
+            return high * 1.0008
+    return None
+
+
 def _refine_sl_with_5m(candles_5m: list, level_price: float, side: str) -> Optional[float]:
     """
     Zoek in de laatste 3 5m-candles de sweep-candle die het 15m-signaal veroorzaakte.
@@ -372,7 +389,8 @@ def check_liquidity_sweep(candles, key_levels: list[Level], structure: str,
     return None
 
 
-def check_breakout(candles, key_levels: list[Level], structure: str) -> Optional[Signal]:
+def check_breakout(candles, key_levels: list[Level], structure: str,
+                   candles_5m: list = None) -> Optional[Signal]:
     """
     Breakout setup:
     - Candle sluit boven resistance (of onder support)
@@ -396,6 +414,9 @@ def check_breakout(candles, key_levels: list[Level], structure: str) -> Optional
                 prev[4] < lp and close > lp * 1.002):
             if near_level(low, lp, 0.008) and confirmation_candle(candles, 'bullish'):
                 sl = low - (close - low) * 0.3
+                sl_5m = _refine_sl_5m(candles_5m, 'buy')
+                if sl_5m and sl_5m > sl:
+                    sl = sl_5m
                 tp1, tp2, tp3 = find_tp_levels(close, 'buy', key_levels, candles)
                 return Signal(
                     setup_type='breakout', side='buy',
@@ -409,6 +430,9 @@ def check_breakout(candles, key_levels: list[Level], structure: str) -> Optional
                 prev[4] > lp and close < lp * 0.998):
             if near_level(high, lp, 0.008) and confirmation_candle(candles, 'bearish'):
                 sl = high + (high - close) * 0.3
+                sl_5m = _refine_sl_5m(candles_5m, 'sell')
+                if sl_5m and sl_5m < sl:
+                    sl = sl_5m
                 tp1, tp2, tp3 = find_tp_levels(close, 'sell', key_levels, candles)
                 return Signal(
                     setup_type='breakout', side='sell',
@@ -478,7 +502,8 @@ def check_range(candles, structure: str = 'ranging') -> Optional[Signal]:
     return None
 
 
-def check_continuation(candles, key_levels: list[Level], structure: str) -> Optional[Signal]:
+def check_continuation(candles, key_levels: list[Level], structure: str,
+                       candles_5m: list = None) -> Optional[Signal]:
     """
     Continuation setup:
     - Trend is duidelijk (uptrend of downtrend)
@@ -496,18 +521,18 @@ def check_continuation(candles, key_levels: list[Level], structure: str) -> Opti
     for level in key_levels:
         lp = level.price
 
-        # In uptrend: pullback naar vorige resistance (nu support)
-        # Extra filter: candle moet bullish sluiten (close > open)
         if (structure == 'uptrend' and level.type == 'resistance' and
                 near_level(close, lp, 0.006) and
-                close > open_ and                          # bullish candle
+                close > open_ and
                 confirmation_candle(candles, 'bullish') and
                 level.strength >= 1):
             sl = low - abs(close - lp) * 0.6
-            if close - sl <= 0 or close - sl < (close * 0.003):  # min SL afstand 0.3%
+            sl_5m = _refine_sl_5m(candles_5m, 'buy')
+            if sl_5m and sl_5m > sl:
+                sl = sl_5m
+            if close - sl <= 0 or close - sl < (close * 0.003):
                 continue
             tp1, tp2, tp3 = find_tp_levels(close, 'buy', key_levels, candles)
-            # Valideer R:R intern
             if tp2 - close < (close - sl) * 2:
                 continue
             return Signal(
@@ -517,14 +542,15 @@ def check_continuation(candles, key_levels: list[Level], structure: str) -> Opti
                 confidence=0.74
             )
 
-        # In downtrend: pullback naar vorige support (nu resistance)
-        # Extra filter: candle moet bearish sluiten (close < open)
         if (structure == 'downtrend' and level.type == 'support' and
                 near_level(close, lp, 0.006) and
-                close < open_ and                          # bearish candle
+                close < open_ and
                 confirmation_candle(candles, 'bearish') and
                 level.strength >= 1):
             sl = high + abs(lp - close) * 0.6
+            sl_5m = _refine_sl_5m(candles_5m, 'sell')
+            if sl_5m and sl_5m < sl:
+                sl = sl_5m
             if sl - close <= 0 or sl - close < (close * 0.003):
                 continue
             tp1, tp2, tp3 = find_tp_levels(close, 'sell', key_levels, candles)
@@ -539,7 +565,7 @@ def check_continuation(candles, key_levels: list[Level], structure: str) -> Opti
     return None
 
 
-def check_rotation(candles, structure: str) -> Optional[Signal]:
+def check_rotation(candles, structure: str, candles_5m: list = None) -> Optional[Signal]:
     """
     Rotation setup:
     - Structuurbreuk: uptrend maakt een LL, downtrend maakt een HH
@@ -575,6 +601,9 @@ def check_rotation(candles, structure: str) -> Optional[Signal]:
 
     if structure_break_bear and rejection_bear:
         sl = high + abs(high - close) * 0.3
+        sl_5m = _refine_sl_5m(candles_5m, 'sell')
+        if sl_5m and sl_5m < sl:
+            sl = sl_5m
         if sl - close > 0:
             tp1, tp2, tp3 = find_tp_levels(close, 'sell', key_levels_temp, candles)
             return Signal(
@@ -591,6 +620,9 @@ def check_rotation(candles, structure: str) -> Optional[Signal]:
 
     if structure_break_bull and rejection_bull:
         sl = low - abs(close - low) * 0.3
+        sl_5m = _refine_sl_5m(candles_5m, 'buy')
+        if sl_5m and sl_5m > sl:
+            sl = sl_5m
         if close - sl > 0:
             tp1, tp2, tp3 = find_tp_levels(close, 'buy', key_levels_temp, candles)
             return Signal(
@@ -665,9 +697,9 @@ def analyze(candles_15m: list, candles_1h: list, cooldown_candles: int = 0,
 
     signal = (
         (check_liquidity_sweep(candles_15m, all_levels, structure_1h, candles_5m) if 'liquidity_sweep' not in off else None) or
-        (check_rotation(candles_15m, structure_1h) if 'rotation' not in off else None) or
-        (check_breakout(candles_15m, all_levels, structure_1h) if 'breakout' not in off else None) or
-        (check_continuation(candles_15m, all_levels, structure_1h) if 'continuation' not in off else None)
+        (check_rotation(candles_15m, structure_1h, candles_5m) if 'rotation' not in off else None) or
+        (check_breakout(candles_15m, all_levels, structure_1h, candles_5m) if 'breakout' not in off else None) or
+        (check_continuation(candles_15m, all_levels, structure_1h, candles_5m) if 'continuation' not in off else None)
     )
 
     if signal:
