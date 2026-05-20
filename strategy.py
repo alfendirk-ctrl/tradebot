@@ -18,7 +18,7 @@ Risk management:
 - Trend filter: higher highs & higher lows op 1h
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 from datetime import datetime, timezone
 import logging
@@ -86,6 +86,8 @@ class Signal:
     confidence: float        # 0.0 - 1.0
     session: str = 'unknown' # 'london' | 'new_york' | 'off-hours'
     valid_until: str = ''    # ISO timestamp; na dit tijdstip is het signaal stale
+    context_score: int = 0
+    context_breakdown: dict = field(default_factory=dict)
 
 # ─── Market Structure ──────────────────────────────────────────────────────────
 
@@ -640,12 +642,96 @@ def calc_atr(candles: list, period: int = 14) -> float:
     n = min(period, len(candles))
     return sum(abs(c[2] - c[3]) for c in candles[-n:]) / n if n > 0 else 0.0
 
+# ─── Context Score ────────────────────────────────────────────────────────────
+
+def calculate_context_score(candles_15m: list, candles_1h: list, candles_4h: list,
+                             signal, all_levels: list) -> dict:
+    """
+    Score 0-100. ATR SL check is mandatory — if it fails, score=0 and setup is invalid.
+    Returns dict with 'score' (int), 'valid' (bool), 'breakdown' (dict of factor->points).
+    """
+    breakdown = {}
+    score = 0
+
+    # ── Mandatory: SL >= 1.5× ATR14 ──────────────────────────────────────────
+    atr14 = calc_atr(candles_15m, 14)
+    sl_dist = abs(signal.entry - signal.stop_loss)
+    if atr14 > 0 and sl_dist < atr14 * 1.5:
+        return {'score': 0, 'valid': False, 'breakdown': {'atr_sl': 0}}
+    breakdown['atr_sl'] = 15
+    score += 15
+
+    # ── 4H trend confirms signal direction ────────────────────────────────────
+    if candles_4h and len(candles_4h) >= 10:
+        s4h = get_market_structure(candles_4h)
+        if ((s4h == 'uptrend'   and signal.side == 'buy') or
+            (s4h == 'downtrend' and signal.side == 'sell')):
+            breakdown['trend_4h'] = 20; score += 20
+        else:
+            breakdown['trend_4h'] = 0
+    else:
+        breakdown['trend_4h'] = 0
+
+    # ── 1H trend confirms signal direction ────────────────────────────────────
+    s1h = get_market_structure(candles_1h)
+    if ((s1h == 'uptrend'   and signal.side == 'buy') or
+        (s1h == 'downtrend' and signal.side == 'sell')):
+        breakdown['trend_1h'] = 15; score += 15
+    else:
+        breakdown['trend_1h'] = 0
+
+    # ── Volume confirmation ───────────────────────────────────────────────────
+    avg_vol = avg_volume(candles_15m, 20)
+    curr_vol = candles_15m[-1][5] if len(candles_15m[-1]) > 5 else 0
+    if avg_vol > 0 and curr_vol >= avg_vol * 1.2:
+        breakdown['volume'] = 15; score += 15
+    else:
+        breakdown['volume'] = 0
+
+    # ── Level cleanliness: max 2 prior touches ────────────────────────────────
+    entry = signal.entry
+    nearby = [l for l in all_levels if abs(l.price - entry) / entry < 0.005]
+    if nearby and max(l.strength for l in nearby) <= 2:
+        breakdown['level_clean'] = 15; score += 15
+    elif not nearby:
+        breakdown['level_clean'] = 15; score += 15  # no prior level = clean
+    else:
+        breakdown['level_clean'] = 0
+
+    # ── Round number proximity (within 0.3% of x000 or x500) ─────────────────
+    rounded_000 = round(entry / 1000) * 1000
+    rounded_500 = round(entry / 500) * 500
+    dist = min(abs(entry - rounded_000), abs(entry - rounded_500)) / entry
+    if dist < 0.003:
+        breakdown['round_number'] = 10; score += 10
+    else:
+        breakdown['round_number'] = 0
+
+    # ── Previous candle is inside bar or doji ─────────────────────────────────
+    if len(candles_15m) >= 3:
+        prev  = candles_15m[-2]
+        pprev = candles_15m[-3]
+        p_body = abs(prev[4] - prev[1])
+        p_range = prev[2] - prev[3]
+        is_doji    = p_range > 0 and p_body / p_range < 0.15
+        is_inside  = prev[2] <= pprev[2] and prev[3] >= pprev[3]
+        if is_doji or is_inside:
+            breakdown['inside_doji'] = 10; score += 10
+        else:
+            breakdown['inside_doji'] = 0
+    else:
+        breakdown['inside_doji'] = 0
+
+    return {'score': min(score, 100), 'valid': score >= 50, 'breakdown': breakdown}
+
+
 # ─── Main Analyzer ────────────────────────────────────────────────────────────
 
 def analyze(candles_15m: list, candles_1h: list, cooldown_candles: int = 0,
             candles_4h: list = None, candles_5m: list = None,
-            session_filter: bool = True,
-            disabled_setups: list = None) -> Optional[Signal]:
+            session_filter: bool = False,
+            disabled_setups: list = None,
+            scalp_mode: bool = False) -> Optional[Signal]:
     """
     Analyseer de markt op alle 4 DoopieCash setups.
     Gebruikt 4h (indien opgegeven) als macro-bias, 1h voor trendrichting, 15m voor instap.
@@ -653,7 +739,8 @@ def analyze(candles_15m: list, candles_1h: list, cooldown_candles: int = 0,
 
     cooldown_candles: aantal candles sinds laatste SL — geen trades tijdens cooldown.
     candles_4h: optioneel; als opgegeven wordt alleen getraded in de richting van de 4h trend.
-    session_filter: als True, worden trades buiten London/NY sessie geweigerd.
+    session_filter: niet meer gebruikt (altijd False), bewaard voor compatibiliteit.
+    scalp_mode: als True, gebruik tightere SL minimum en vaste R:R TP levels.
     """
     if len(candles_15m) < 30 or len(candles_1h) < 20:
         logger.warning("Niet genoeg candles voor analyse")
@@ -663,12 +750,9 @@ def analyze(candles_15m: list, candles_1h: list, cooldown_candles: int = 0,
     if cooldown_candles > 0 and cooldown_candles < 5:
         return None
 
-    # Session filter: alleen traden tijdens London en NY
+    # Session info (voor logging en signaal metadata — filter niet meer actief)
     now = datetime.now(timezone.utc)
-    active, session_name = in_active_session(now)
-    if session_filter and not active:
-        logger.info(f"Buiten actieve sessie ({session_name}) — geen nieuwe entries")
-        return None
+    _, session_name = in_active_session(now)
 
     # Macro-bias op 4h: trade alleen mee met de 4h trend
     structure_4h = None
@@ -714,11 +798,12 @@ def analyze(candles_15m: list, candles_1h: list, cooldown_candles: int = 0,
 
         atr = calc_atr(candles_15m, 14)
 
-        # SL minimaal 1.5× ATR van entry
-        min_sl_dist = 1.5 * atr
+        # SL minimaal 1.5× ATR van entry (1.0× in scalp mode)
+        min_sl_multiplier = 1.0 if scalp_mode else 1.5
+        min_sl_dist = min_sl_multiplier * atr
         sl_dist = abs(signal.entry - signal.stop_loss)
         if sl_dist < min_sl_dist:
-            logger.info(f"SL vergroot: {sl_dist:.0f} → {min_sl_dist:.0f} (1.5× ATR={atr:.0f})")
+            logger.info(f"SL vergroot: {sl_dist:.0f} → {min_sl_dist:.0f} ({min_sl_multiplier}× ATR={atr:.0f})")
             signal.stop_loss = (
                 signal.entry - min_sl_dist if signal.side == 'buy'
                 else signal.entry + min_sl_dist
@@ -739,6 +824,26 @@ def analyze(candles_15m: list, candles_1h: list, cooldown_candles: int = 0,
             logger.info(f"Signal afgewezen: R:R te laag ({rr:.1f})")
             return None
 
+        # Scalp mode: override TPs naar vaste R multiples
+        if scalp_mode:
+            risk = abs(signal.entry - signal.stop_loss)
+            if signal.side == 'buy':
+                signal.tp1 = signal.entry + risk
+                signal.tp2 = signal.entry + risk * 2
+                signal.tp3 = signal.entry + risk * 3
+            else:
+                signal.tp1 = signal.entry - risk
+                signal.tp2 = signal.entry - risk * 2
+                signal.tp3 = signal.entry - risk * 3
+
+        # Context score
+        ctx = calculate_context_score(candles_15m, candles_1h, candles_4h or [], signal, all_levels)
+        if not ctx['valid']:
+            logger.info(f"Signal afgewezen: context score te laag ({ctx['score']}/100)")
+            return None
+        signal.context_score = ctx['score']
+        signal.context_breakdown = ctx['breakdown']
+
         # Sessie en expiry invullen op het signaal
         signal.session = session_name
         # Signaal is geldig voor 2 candles (30 min op 15m)
@@ -748,7 +853,7 @@ def analyze(candles_15m: list, candles_1h: list, cooldown_candles: int = 0,
         logger.info(
             f"Signal: {signal.setup_type.upper()} {signal.side.upper()} | "
             f"{signal.reason} | R:R={rr:.1f} | sessie={session_name} | "
-            f"geldig tot {signal.valid_until}"
+            f"score={ctx['score']}/100 | geldig tot {signal.valid_until}"
         )
 
     return signal

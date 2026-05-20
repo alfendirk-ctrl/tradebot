@@ -1,13 +1,17 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 import os
 import threading
 import time
-from bot import state, run_bot, get_setup_health, SETUP_TYPES, get_public_exchange, get_exchange
+import requests
+import sqlite3
+from bot import (state, run_bot, get_setup_health, SETUP_TYPES, get_public_exchange, get_exchange,
+                 pending_signals, _pending_lock, place_order)
 from dataclasses import asdict
-from db import clear_trades as db_clear_trades, get_trade_candles, save_review, load_reviews_summary
+from db import (clear_trades as db_clear_trades, get_trade_candles, save_review, load_reviews_summary,
+                save_pending_signal, update_pending_signal_status, load_pending_signals)
 from backtest import (
     BacktestConfig, backtest_state, run_backtest,
     monte_carlo_state, run_monte_carlo,
@@ -55,6 +59,9 @@ def get_status():
         "daily_loss_pct": round((state.equity - state.day_start_equity) / state.day_start_equity * 100, 2) if state.day_start_equity > 0 else 0.0,
         "disabled_setups": state.disabled_setups,
         "setup_health": {s: get_setup_health(s) for s in SETUP_TYPES},
+        "trade_mode": state.trade_mode,
+        "human_approval": state.human_approval,
+        "pending_count": state.pending_count,
     }
 
 @app.post("/start")
@@ -279,6 +286,174 @@ def get_monte_carlo():
         "progress": round(monte_carlo_state.progress * 100),
         "error":    monte_carlo_state.error,
         "result":   monte_carlo_state.result,
+    }
+
+
+@app.on_event("startup")
+async def register_webhook():
+    token    = os.environ.get('TELEGRAM_BOT_TOKEN', '')
+    rail_url = os.environ.get('RAILWAY_URL', '')
+    if token and rail_url:
+        webhook_url = f"{rail_url.rstrip('/')}/telegram/webhook"
+        try:
+            r = requests.post(
+                f"https://api.telegram.org/bot{token}/setWebhook",
+                json={"url": webhook_url}, timeout=5)
+            import logging
+            logging.getLogger(__name__).info(f"Telegram webhook geregistreerd: {webhook_url} → {r.json()}")
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"Webhook registratie mislukt: {e}")
+
+
+@app.post("/telegram/webhook", include_in_schema=False)
+async def telegram_webhook(request: Request):
+    data = await request.json()
+    if 'callback_query' not in data:
+        return {"ok": True}
+
+    query    = data['callback_query']
+    cb_data  = query.get('data', '')
+    chat_id  = query['message']['chat']['id']
+    msg_id   = query['message']['message_id']
+    token    = os.environ.get('TELEGRAM_BOT_TOKEN', '')
+
+    def answer_callback(text=""):
+        if token:
+            try:
+                requests.post(f"https://api.telegram.org/bot{token}/answerCallbackQuery",
+                              json={"callback_query_id": query['id'], "text": text}, timeout=3)
+            except Exception:
+                pass
+
+    def edit_message(text):
+        if token:
+            try:
+                requests.post(f"https://api.telegram.org/bot{token}/editMessageText",
+                              json={"chat_id": chat_id, "message_id": msg_id,
+                                    "text": text, "parse_mode": "HTML"}, timeout=3)
+            except Exception:
+                pass
+
+    def send_msg(text, reply_markup=None):
+        if token:
+            payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
+            if reply_markup:
+                payload["reply_markup"] = reply_markup
+            try:
+                requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
+                              json=payload, timeout=3)
+            except Exception:
+                pass
+
+    if cb_data.startswith('approve:'):
+        signal_id = cb_data.split(':', 1)[1]
+        with _pending_lock:
+            ps = pending_signals.pop(signal_id, None)
+        if ps is None:
+            answer_callback("⚠️ Setup niet meer beschikbaar (verlopen of al verwerkt)")
+            return {"ok": True}
+        try:
+            exchange = ps['exchange']
+            signal   = ps['signal']
+            qty      = ps['qty']
+            candles  = ps['candles_15m']
+            trade = place_order(exchange, state.symbol, signal, qty, candles)
+            if trade:
+                state.trades.append(trade)
+                update_pending_signal_status(signal_id, 'approved')
+                answer_callback("✅ Order geplaatst!")
+                edit_message(f"✅ <b>GOEDGEKEURD</b> — {signal.setup_type.upper()} {signal.side.upper()} @ {signal.entry:.0f}")
+            else:
+                answer_callback("❌ Order mislukt")
+        except Exception as e:
+            answer_callback(f"Fout: {e}")
+
+    elif cb_data.startswith('skip:'):
+        signal_id = cb_data.split(':', 1)[1]
+        with _pending_lock:
+            ps = pending_signals.pop(signal_id, None)
+        if ps:
+            update_pending_signal_status(signal_id, 'skipped')
+        answer_callback("Setup overgeslagen")
+        edit_message(f"❌ <b>OVERGESLAGEN</b> — {signal_id}")
+        send_msg(
+            f"Waarom heb je <b>{signal_id}</b> overgeslagen?",
+            reply_markup={"inline_keyboard": [[
+                {"text": "Level te zwak",      "callback_data": f"reason:{signal_id}:level_weak"},
+                {"text": "Geen bevestiging",   "callback_data": f"reason:{signal_id}:no_confirm"},
+            ], [
+                {"text": "Trend klopt niet",   "callback_data": f"reason:{signal_id}:wrong_trend"},
+                {"text": "Timing slecht",      "callback_data": f"reason:{signal_id}:bad_timing"},
+            ], [
+                {"text": "Anders",             "callback_data": f"reason:{signal_id}:other"},
+            ]]}
+        )
+
+    elif cb_data.startswith('reason:'):
+        parts = cb_data.split(':', 2)
+        if len(parts) == 3:
+            _, signal_id, reason = parts
+            update_pending_signal_status(signal_id, 'skipped', reason)
+            answer_callback("Reden opgeslagen, bedankt!")
+            edit_message(f"📝 Reden opgeslagen: <b>{reason.replace('_', ' ')}</b>")
+
+    state.pending_count = len(pending_signals)
+    return {"ok": True}
+
+
+@app.get("/pending")
+def get_pending():
+    return {"pending": load_pending_signals('pending'), "count": len(pending_signals)}
+
+
+@app.get("/learning_stats")
+def get_learning_stats():
+    db_path = os.environ.get('DB_PATH', 'trades.db')
+    with sqlite3.connect(db_path) as c:
+        c.row_factory = sqlite3.Row
+        rows = c.execute("SELECT * FROM signal_reviews ORDER BY timestamp DESC").fetchall()
+    reviews = [dict(r) for r in rows]
+    n = len(reviews)
+    if n < 5:
+        return {"message": f"Niet genoeg data ({n}/30 beoordelingen)", "reviews": n}
+
+    approved = [r for r in reviews if r['approved']]
+    skipped  = [r for r in reviews if not r['approved']]
+    factors  = ['score_atr_sl', 'score_trend_4h', 'score_trend_1h', 'score_volume',
+                'score_level_clean', 'score_round_number', 'score_inside_doji']
+
+    def avg_factor(lst, f):
+        vals = [r[f] for r in lst if r[f] is not None]
+        return round(sum(vals) / len(vals), 1) if vals else 0
+
+    rejection_counts = {}
+    for r in skipped:
+        rr = r.get('rejection_reason') or 'unknown'
+        rejection_counts[rr] = rejection_counts.get(rr, 0) + 1
+
+    factor_comparison = {
+        f: {
+            'avg_approved': avg_factor(approved, f),
+            'avg_skipped':  avg_factor(skipped, f),
+        }
+        for f in factors
+    }
+
+    suggestions = sorted(
+        [(f, abs(v['avg_approved'] - v['avg_skipped'])) for f, v in factor_comparison.items()],
+        key=lambda x: -x[1]
+    )
+
+    return {
+        "total_reviews": n,
+        "approved": len(approved),
+        "skipped": len(skipped),
+        "approval_rate": round(len(approved) / n * 100) if n else 0,
+        "factor_comparison": factor_comparison,
+        "rejection_reasons": rejection_counts,
+        "top_differentiating_factors": [s[0] for s in suggestions[:3]],
+        "ready_for_learning": n >= 30,
     }
 
 

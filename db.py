@@ -39,10 +39,55 @@ CREATE TABLE IF NOT EXISTS trades (
 );
 """
 
+_CREATE_PENDING_SIGNALS = """
+CREATE TABLE IF NOT EXISTS pending_signals (
+    id           TEXT PRIMARY KEY,
+    setup_type   TEXT,
+    side         TEXT,
+    entry        REAL,
+    stop_loss    REAL,
+    tp1          REAL,
+    tp2          REAL,
+    tp3          REAL,
+    reason       TEXT,
+    context_score INTEGER DEFAULT 0,
+    context_breakdown TEXT,
+    symbol       TEXT,
+    quantity     REAL,
+    created_at   REAL,
+    expires_at   REAL,
+    status       TEXT DEFAULT 'pending',
+    rejection_reason TEXT DEFAULT NULL,
+    timestamp    TEXT
+);
+"""
+
+_CREATE_SIGNAL_REVIEWS = """
+CREATE TABLE IF NOT EXISTS signal_reviews (
+    id           TEXT PRIMARY KEY,
+    signal_id    TEXT,
+    setup_type   TEXT,
+    side         TEXT,
+    approved     INTEGER,
+    rejection_reason TEXT,
+    score        INTEGER,
+    score_atr_sl     INTEGER DEFAULT 0,
+    score_trend_4h   INTEGER DEFAULT 0,
+    score_trend_1h   INTEGER DEFAULT 0,
+    score_volume     INTEGER DEFAULT 0,
+    score_level_clean INTEGER DEFAULT 0,
+    score_round_number INTEGER DEFAULT 0,
+    score_inside_doji INTEGER DEFAULT 0,
+    outcome      TEXT DEFAULT NULL,
+    timestamp    TEXT
+);
+"""
+
 _MIGRATIONS = [
     "ALTER TABLE trades ADD COLUMN candle_snapshot TEXT",
     "ALTER TABLE trades ADD COLUMN review_label    TEXT DEFAULT NULL",
     "ALTER TABLE trades ADD COLUMN review_note     TEXT DEFAULT NULL",
+    "ALTER TABLE trades ADD COLUMN context_score   INTEGER DEFAULT 0",
 ]
 
 def _conn():
@@ -51,6 +96,8 @@ def _conn():
 def init_db():
     with _conn() as c:
         c.execute(_CREATE_TABLE)
+        c.execute(_CREATE_PENDING_SIGNALS)
+        c.execute(_CREATE_SIGNAL_REVIEWS)
         for sql in _MIGRATIONS:
             try:
                 c.execute(sql)
@@ -64,12 +111,12 @@ def save_trade(t: dict):
         (id, symbol, side, setup_type, entry_price, quantity, stop_loss,
          tp1, tp2, tp3, timestamp, reason, status,
          tp1_hit, tp2_hit, tp3_hit, exit_price, realized_pnl, session, valid_until,
-         review_label, review_note)
+         review_label, review_note, context_score)
     VALUES
         (:id, :symbol, :side, :setup_type, :entry_price, :quantity, :stop_loss,
          :tp1, :tp2, :tp3, :timestamp, :reason, :status,
          :tp1_hit, :tp2_hit, :tp3_hit, :exit_price, :realized_pnl, :session, :valid_until,
-         :review_label, :review_note)
+         :review_label, :review_note, :context_score)
     """
     with _conn() as c:
         c.execute(sql, {
@@ -81,6 +128,7 @@ def save_trade(t: dict):
             'valid_until': t.get('valid_until', ''),
             'review_label': t.get('review_label', None),
             'review_note': t.get('review_note', None),
+            'context_score': t.get('context_score', 0),
         })
 
 def update_trade(t: dict):
@@ -109,7 +157,8 @@ def load_trades() -> list[dict]:
         rows = c.execute(
             "SELECT id, symbol, side, setup_type, entry_price, quantity, stop_loss, "
             "tp1, tp2, tp3, timestamp, reason, status, tp1_hit, tp2_hit, tp3_hit, "
-            "exit_price, realized_pnl, session, valid_until, review_label, review_note "
+            "exit_price, realized_pnl, session, valid_until, review_label, review_note, "
+            "COALESCE(context_score, 0) as context_score "
             "FROM trades ORDER BY timestamp ASC"
         ).fetchall()
     trades = []
@@ -153,3 +202,59 @@ def load_reviews_summary() -> list[dict]:
             "FROM trades WHERE status = 'closed' AND review_label IS NOT NULL"
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def save_pending_signal(ps: dict):
+    import json
+    with _conn() as c:
+        c.execute("""
+        INSERT OR REPLACE INTO pending_signals
+        (id, setup_type, side, entry, stop_loss, tp1, tp2, tp3, reason,
+         context_score, context_breakdown, symbol, quantity, created_at, expires_at, status, timestamp)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?)
+        """, (
+            ps['id'], ps['setup_type'], ps['side'], ps['entry'], ps['stop_loss'],
+            ps['tp1'], ps['tp2'], ps['tp3'], ps['reason'],
+            ps.get('context_score', 0), json.dumps(ps.get('context_breakdown', {})),
+            ps['symbol'], ps['quantity'], ps['created_at'], ps['expires_at'],
+            ps['timestamp']
+        ))
+
+
+def update_pending_signal_status(signal_id: str, status: str, rejection_reason: str = None):
+    with _conn() as c:
+        c.execute("UPDATE pending_signals SET status=?, rejection_reason=? WHERE id=?",
+                  (status, rejection_reason, signal_id))
+
+
+def load_pending_signals(status='pending') -> list[dict]:
+    with _conn() as c:
+        c.row_factory = sqlite3.Row
+        rows = c.execute(
+            "SELECT * FROM pending_signals WHERE status=? ORDER BY created_at DESC", (status,)
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def save_signal_review(signal_id: str, setup_type: str, side: str, approved: bool,
+                        rejection_reason: str, score_dict: dict):
+    import json
+    import uuid
+    from datetime import datetime
+    breakdown = score_dict.get('breakdown', {})
+    with _conn() as c:
+        c.execute("""
+        INSERT OR REPLACE INTO signal_reviews
+        (id, signal_id, setup_type, side, approved, rejection_reason, score,
+         score_atr_sl, score_trend_4h, score_trend_1h, score_volume,
+         score_level_clean, score_round_number, score_inside_doji, timestamp)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """, (
+            str(uuid.uuid4()), signal_id, setup_type, side, int(approved),
+            rejection_reason, score_dict.get('score', 0),
+            breakdown.get('atr_sl', 0), breakdown.get('trend_4h', 0),
+            breakdown.get('trend_1h', 0), breakdown.get('volume', 0),
+            breakdown.get('level_clean', 0), breakdown.get('round_number', 0),
+            breakdown.get('inside_doji', 0),
+            datetime.utcnow().isoformat()
+        ))
